@@ -42,9 +42,9 @@ var parentingNodeTool = {
 		gl.disable(gl.DEPTH_TEST);
 		gl.enable(gl.BLEND);
 		gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-		Draw.setColor([1,0,1,1]);
+		LS.Draw.setColor([1,0,1,1]);
 
-		Draw.renderLines([pos2D, this.mouse_pos]);
+		LS.Draw.renderLines([pos2D, this.mouse_pos]);
 
 		gl.enable(gl.DEPTH_TEST);
 	},
@@ -54,7 +54,7 @@ var parentingNodeTool = {
 		if (e.which != GL.LEFT_MOUSE_BUTTON)
 			return;
 
-		var instance_info = LS.Picking.getInstanceAtCanvasPosition( LS.GlobalScene, ToolUtils.getCamera(), e.canvasx, e.canvasy );
+		var instance_info = LS.Picking.getInstanceAtCanvasPosition( e.canvasx, e.canvasy, ToolUtils.getCamera() );
 		SelectionModule.setSelection( instance_info );
 		if(!instance_info)
 			return;
@@ -75,7 +75,7 @@ var parentingNodeTool = {
 		if(!child) 
 			return;
 
-		var instance_info = LS.Picking.getInstanceAtCanvasPosition( scene, ToolUtils.getCamera(e), e.canvasx, e.canvasy );
+		var instance_info = LS.Picking.getInstanceAtCanvasPosition( e.canvasx, e.canvasy, ToolUtils.getCamera(e) );
 		if(instance_info)
 		{
 			var selection = SelectionModule.convertSelection( instance_info );

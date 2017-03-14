@@ -1,86 +1,13 @@
-var genericFX = {
-	name: "genericFX",
-
-	init: function()
-	{
-		var menubar = LiteGUI.menubar;
-		menubar.add("Actions/Tools/day light", { callback: function() { genericFX.showDayLightDialog(); }});
-	},
-
-	showDayLightDialog: function()
-	{
-		var dialog = new LiteGUI.Dialog("dialog_daylight", {title:"Day light editor", close: true, width: 300, height: 120, scroll: false, draggable: true});
-		dialog.show('fade');
-
-		var scene = LS.GlobalScene;
-		var light = scene.root.light;
-
-		var sun_height = scene.extra.sun_height || 1;
-		var sun_orientation = scene.extra.sun_orientation || 0;
-		var sun_distance = scene.extra.sun_distance || vec3.dist( light.position, light.target);
-		var change_color = false;
-
-		var widgets = new LiteGUI.Inspector();
-		widgets.addSlider("Sun Height", sun_height, { min:0, max:1, step:0.001, callback: function(v) { sun_height = v; inner_update(); }});
-		widgets.addSlider("Sun Orientation", sun_orientation, { min:0, max:360, step:1, callback: function(v) { sun_orientation = v; inner_update(); }});
-		widgets.addSlider("Sun Distance", sun_distance, { min:0, max:1000, step:1, callback: function(v) { sun_distance = v; inner_update(); }});
-		widgets.addCheckbox("Change color", change_color, { callback: function(v) { change_color = v; inner_update(); }});
-		dialog.add(widgets);
-
-		var gradient_sun = [[0,0,0],[0.4,0.512,0.2],[1,0.68,0.2],[1,0.93,0.7],[1,1,1],[1,1,1]];
-		var gradient_sky = [[0,0,0],[0.1752,0.22272,0.24], [0.7,0.4,0.02],[0.55,0.74,0.94],[0.75,0.91,0.97],[0.75,0.91,0.97]];
-
-		inner_update();
-
-		function inner_update()
-		{
-			light.type = Light.DIRECTIONAL;
-			light.size = 140;
-
-			//color
-			if(change_color)
-			{
-				var c = null;
-				var c1 = Math.floor(sun_height * (gradient_sun.length-1));
-				var c2 = Math.ceil(sun_height * (gradient_sun.length-1));
-				var f = sun_height * (gradient_sun.length-1) % 1;
-
-				vec3.lerp( light.color, gradient_sun[c1], gradient_sun[c2],f );
-				if(scene.info)
-				{
-					vec3.lerp( scene.info.background_color, gradient_sky[c1], gradient_sky[c2],f);
-					vec3.lerp( scene.info.ambient_color, gradient_sky[c1], gradient_sky[c2],f );
-					vec3.scale( scene.info.ambient_color, scene.info.ambient_color, 0.8 );
-				}
-			}
-
-			//position
-			var rot_pitch = quat.setAxisAngle( quat.create(), [1,0,0], (1-sun_height) * Math.PI * 0.5 );
-			vec3.transformQuat( light.position, [0,sun_distance,0], rot_pitch);
-
-			var rot_yaw = quat.setAxisAngle(quat.create(), [0,1,0], sun_orientation * 0.0174532925);
-			vec3.transformQuat(light.position, light.position, rot_yaw);
-			light.target.set([0,0,0]);
-
-			scene.extra.sun_height = sun_height;
-			scene.extra.sun_orientation = sun_orientation;
-			scene.extra.sun_distance = sun_distance;
-
-			RenderModule.requestFrame();
-		}
-	}
-}
-
-LiteGUI.registerModule( genericFX );
-
 //***********************************************
 
-var simpleScripter = {
-	name: "simpleScripter",
+var GenericTools = {
+
+	name: "GenericTools",
 
 	init: function()
 	{
-		LiteGUI.menubar.add("Actions/Tools/scripter", { callback: function() { simpleScripter.showScripter(); }});
+		LiteGUI.menubar.add("Actions/Tools/scripter", { callback: function() { GenericTools.showScripter(); }});
+		LiteGUI.menubar.add("Actions/Screen Capture", { callback: function() { GenericTools.showScreenCapture(); }});
 	},
 
 	showScripter: function()
@@ -109,7 +36,7 @@ var simpleScripter = {
 		this.textarea = textarea;
 
 		var first_time = true;
-		var backup = Scene.serialize();
+		var backup = LS.GlobalScene.serialize();
 
 		textarea.bind("keydown",function(e) {
 			var keyCode = e.keyCode || e.which;
@@ -132,44 +59,44 @@ var simpleScripter = {
 			}
 			else if (keyCode == 13 && e.ctrlKey)
 			{
-				$(docked.content).find("button.compile").click();
+				$(dialog.content).find("button.compile").click();
 			}
 		});
 
 		$(dialog.content).find("button.update").click(function() {
-			backup = Scene.serialize();
+			backup = LS.GlobalScene.serialize();
 		});
 
 		$(dialog.content).find("button.reset").click(function() {
 			var id = null;
-			if(Scene.selected_node)
-				id = Scene.selected_node.id;
-			Scene.clear();
-			Scene.configure( backup );
+			if(LS.GlobalScene.selected_node)
+				id = LS.GlobalScene.selected_node.id;
+			LS.GlobalScene.clear();
+			LS.GlobalScene.configure( backup );
 			if(id != null)
-				Scene.selected_node = Scene.getNode(id);
+				LS.GlobalScene.selected_node = LS.GlobalScene.getNode( id );
 			RenderModule.requestFrame();
 		});
 
 		$(dialog.content).find("button.execute").click(function() {
 			UndoModule.saveSceneUndo();
-			simpleScripter.compileCode();
+			GenericTools.compileCode();
 		});
 
 		$(dialog.content).find("button.auto-compile").click(function() {
 			if( $(this).hasClass("enabled") )
 			{
 				$(this).removeClass("enabled");
-				clearInterval( simpleScripter._autocompile_timer  );
-				simpleScripter._autocompile_timer = null;
+				clearInterval( GenericTools._autocompile_timer  );
+				GenericTools._autocompile_timer = null;
 			}
 			else
 			{
 				$(this).addClass("enabled");
 				UndoModule.saveSceneUndo();
-				simpleScripter._autocompile_timer = setInterval(function() {
-					simpleScripter.compileCode();
-					if(Scene.nodes.length > 200)
+				GenericTools._autocompile_timer = setInterval(function() {
+					GenericTools.compileCode();
+					if(LS.GlobalScene.nodes.length > 200)
 						$("button.auto-compile").click(); //fail safe
 				}, 1000/60);
 			}
@@ -187,12 +114,12 @@ var simpleScripter = {
 	{
 		var code = this.textarea.val();
 		localStorage.setItem("wglstudio-scripter-code",code);
-		code =  "var $1 = Scene.selected_node;\n" + code;
+		code =  "var $1 = LS.GlobalScene.selected_node;\n" + code;
 
 		try
 		{
-			eval( "simpleScripter._compiled_func = function() {" + code + ";\n};");
-			simpleScripter._compiled_func();
+			eval( "GenericTools._compiled_func = function() {" + code + ";\n};");
+			GenericTools._compiled_func();
 			RenderModule.requestFrame();
 		}
 		catch (err)
@@ -206,6 +133,99 @@ var simpleScripter = {
 		if(this._compiled_func)
 			this._last_valid_func = this._compiled_func;
 	},
+
+	showScreenCapture: function()
+	{
+		var dialog = LiteGUI.Dialog.getDialog("screencapture_panel");
+		if(dialog)
+		{
+			dialog.maximize();
+			dialog.highlight(200);
+			return;
+		}
+
+		dialog = new LiteGUI.Dialog("screencapture_panel", {title:'Screen Capture', fullcontent:true, width: 800, height: 400, closable: true, minimize: true, resizable: true, draggable: true });
+
+		var area = new LiteGUI.Area(null,{ size: "100%" });
+		dialog.add(area);
+		area.split("horizontal",[200,null]);
+		area.root.style.height = "calc( 100% - 20px )";
+
+		var inspector = new LiteGUI.Inspector();
+		inspector.addTitle("Image Size");
+		inspector.addCombo("Size","Canvas", { values: ["Canvas","1/2","1/4","2","4","512x512","Custom"], callback: function(v){
+			var width = gl.canvas.width;
+			var height = gl.canvas.height;
+			if(v == "1/2")
+			{
+				width = (width * 0.5)|0;
+				height = (height * 0.5)|0;
+			}
+			else if(v == "1/4")
+			{
+				width = (width * 0.25)|0;
+				height = (height * 0.25)|0;
+			}
+			else if(v == "2")
+			{
+				width = (width * 2)|0;
+				height = (height * 2)|0;
+			}
+			else if(v == "4")
+			{
+				width = (width * 4)|0;
+				height = (height * 4)|0;
+			}
+			else if(v == "512x512")
+			{
+				width = height = 512;
+			}
+			else if(v == "Custom")
+			{
+			}
+			width_widget.setValue(width);
+			height_widget.setValue(height);
+		}});
+		var width_widget = inspector.addNumber("Width", gl.canvas.width, { min:64,step:1 });
+		var height_widget = inspector.addNumber("Height", gl.canvas.height, { min:64,step:1 });
+
+		inspector.addTitle("Shadowmaps");
+		inspector.addCombo("Shadowmap Resolution", RenderModule.render_settings.default_shadowmap_resolution , { values:[ 256,512,1024,2048,4096], callback: function(v){
+			RenderModule.render_settings.default_shadowmap_resolution = v;
+		}});
+		inspector.addButton(null,"set all shadowmaps size to default", function(){
+			var lights = LS.GlobalScene._lights;
+			for(var i in lights)
+				lights[i].shadowmap_resolution = 0; //default
+		});
+
+		inspector.addTitle("Results");
+		inspector.addButton(null,"Capture", function(){
+			RenderModule.takeScreenshot( width_widget.getValue(), height_widget.getValue(), inner_screenshot );
+		});
+		var info_widget = inspector.addInfo(null,"Click capture");
+
+		area.getSection(0).add( inspector );
+
+		var captureArea = area.getSection(1).content;
+		captureArea.style.backgroundColor = "black";
+		captureArea.style.overflow = "auto";
+
+		dialog.show();
+
+		function inner_screenshot( img_blob )
+		{
+			var url = URL.createObjectURL( img_blob );
+
+			var img = new Image();
+			img.setAttribute("download","screen.png");
+			img.src = url;
+			info_widget.setValue("<a href='"+url+"' download='screenshot.png'>Download File</a>");
+			//img.width = "100%";
+			captureArea.innerHTML = ""
+			captureArea.appendChild( img );
+		}
+	}
 };
 
-LiteGUI.registerModule( simpleScripter );
+CORE.registerModule( GenericTools );

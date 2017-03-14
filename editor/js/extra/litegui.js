@@ -13,6 +13,7 @@ var LiteGUI = {
 	content: null,
 
 	panels: {},
+	windows: [], //windows opened by the GUI (we need to know about them to close them once the app closes)
 
 	//undo
 	undo_steps: [],
@@ -20,13 +21,8 @@ var LiteGUI = {
 	//used for blacken when a modal dialog is shown
 	modalbg_div: null,
 
-	_modules_initialized: false,
-
 	//the top menu
 	mainmenu: null,
-
-	//registered modules
-	modules: [],
 
 	/**
 	* initializes the lib, must be called
@@ -75,10 +71,6 @@ var LiteGUI = {
 		if(options.gui_callback)
 			options.gui_callback();
 
-		//init all modules attached to the GUI
-		if(options.initModules != false) 
-			this.initModules();
-
 		//maximize
 		if( this.root.classList.contains("fullscreen") )
 		{
@@ -87,149 +79,146 @@ var LiteGUI = {
 			});
 		}
 
-		//grab some keys
-		document.addEventListener("keydown",function(e){
-			if(e.target.nodeName.toLowerCase() == "input" || e.target.nodeName.toLowerCase() == "textarea")
-				return;
-			if(e.keyCode == 17) return; //ctrl
-
-			if(e.keyCode == 26 || (e.keyCode == 90 && (e.ctrlKey || e.metaKey)) || (e.charCode == 122 && e.ctrlKey) ) //undo
-				LiteGUI.doUndo();
-			if(e.keyCode == 27) //esc
-				$(LiteGUI).trigger("escape");
-
+		window.addEventListener("beforeunload", function(e) {
+			for(var i in LiteGUI.windows)
+				LiteGUI.windows[i].close();
+			LiteGUI.windows = [];
 		});
-
-		//some modules may need to be unloaded
-		window.onbeforeunload = this.onUnload.bind(this);
 	},
 
-
-	initModules: function()
-	{
-		var catch_exceptions = false;
-
-		//pre init
-		for(var i in this.modules)
-			if (this.modules[i].preInit)
-			{
-				if(!catch_exceptions)
-				{
-					this.modules[i].preInit();
-					continue;
-				}
-				try
-				{
-					this.modules[i].preInit();
-				}
-				catch (err)
-				{
-					console.error(err);
-				}
-			}
-
-		//init
-		for(var i in this.modules)
-			if (this.modules[i].init && !this.modules[i]._initialized)
-			{
-				if(!catch_exceptions)
-				{
-					this.modules[i].init();
-				}
-				else
-				{
-					try
-					{
-						this.modules[i].init();
-					}
-					catch (err)
-					{
-						console.error(err);
-					}
-				}
-				this.modules[i]._initialized = true;
-			}
-
-		//post init
-		for(var i in this.modules)
-			if (this.modules[i].postInit)
-			{
-				if(!catch_exceptions)
-				{
-					this.modules[i].postInit();
-				}
-				else
-				{
-					try
-					{
-						this.modules[i].postInit();
-					}
-					catch (err)
-					{
-						console.error(err);
-					}
-				}
-			}
-
-
-		this._modules_initialized = true;
-	},
-
-	registerModule: function(module)
-	{
-		this.modules.push(module);
-
-		//initialize on late registration
-		if(this._modules_initialized)
-		{
-			if (module.preInit) module.preInit();
-			if (module.init) module.init();
-			if (module.postInit) module.postInit();
-		}
-
-		$(this).trigger("module_registered",module);
-	},
-
-	onUnload: function()
-	{
-		for(var i in this.modules)
-			if (this.modules[i].onUnload)
-				this.modules[i].onUnload();
-	},
-
-	//events
-	trigger: function(element, event_name, params)
+	/**
+	* Triggers a simple event in an object (similar to jQuery.trigger)
+	* @method trigger
+	* @param {Object} element could be an HTMLEntity or a regular object
+	* @param {String} event_name the type of the event
+	* @param {*} params it will be stored in e.detail
+	* @param {*} origin it will be stored in e.srcElement
+	*/
+	trigger: function(element, event_name, params, origin)
 	{
 		var evt = document.createEvent( 'CustomEvent' );
 		evt.initCustomEvent( event_name, true,true, params ); //canBubble, cancelable, detail
-		if(element.dispatchEvent)
-			element.dispatchEvent(evt);
-		else
-			throw("trigger can only be called in DOMElements");
+		evt.srcElement = origin;
+		if( element.dispatchEvent )
+			element.dispatchEvent( evt );
+		else if( element.__events )
+			element.__events.dispatchEvent( evt );
+		//else nothing seems binded here so nothing to do
 		return evt;
 	},
 
-	bind: function(element, event, callback)
+	/**
+	* Binds an event in an object (similar to jQuery.bind)
+	* If the element is not an HTML entity a new one is created, attached to the object (as non-enumerable, called __events) and used
+	* @method trigger
+	* @param {Object} element could be an HTMLEntity, a regular object, a query string or a regular Array of entities
+	* @param {String} event the string defining the event
+	* @param {Function} callback where to call
+	*/
+	bind: function( element, event, callback )
 	{
-		element.addEventListener(event, callback);
+		if(!element)
+			throw("Cannot bind to null");
+		if(!event)
+			throw("Event bind missing");
+		if(!callback)
+			throw("Bind callback missing");
+
+		if(element.constructor === String)
+			element = document.querySelectorAll( element );
+			
+		if(element.constructor === NodeList || element.constructor === Array)
+		{
+			for(var i = 0; i < element.length; ++i)
+				inner( element[i] );
+		}
+		else
+			inner( element );
+
+		function inner( element )
+		{
+			if(element.addEventListener)
+				element.addEventListener(event, callback);
+			else if(element.__events)
+				element.__events.addEventListener( event, callback );
+			else
+			{
+				//create a dummy HTMLentity so we can use it to bind HTML events
+				var dummy = document.createElement("span");
+				dummy.widget = element; //double link
+				Object.defineProperty( element, "__events", {
+					enumerable: false,
+					configurable: false,
+					writable: false,
+					value: dummy
+				});
+				element.__events.addEventListener( event, callback );
+			}
+		}
 	},
 
+	/**
+	* Unbinds an event in an object (similar to jQuery.unbind)
+	* @method unbind
+	* @param {Object} element could be an HTMLEntity or a regular object
+	* @param {String} event the string defining the event
+	* @param {Function} callback where to call
+	*/
 	unbind: function(element, event, callback)
 	{
-		element.removeEventListener(event, callback);
+		if( element.removeEventListener )
+			element.removeEventListener( event, callback );
+		else if( element.__events && element.__events.removeEventListener )
+			element.__events.removeEventListener( event, callback );
 	},
 
+	/**
+	* Appends litegui widget to the global interface
+	* @method add
+	* @param {Object} litegui_element
+	*/
 	add: function( litegui_element )
 	{
 		this.content.appendChild( litegui_element.root || litegui_element );
 	},
 
+	/**
+	* Remove from the interface, it is is an HTML element it is removed from its parent, if it is a widget the same.
+	* @method remove
+	* @param {Object} litegui_element it also supports HTMLentity, selector string or Array of elements
+	*/
 	remove: function( element )
 	{
-		if(element.parentNode)
-			element.parentNode.removeChild(element);
+		if(!element)
+			return;
+
+		if( element.constructor === String) //selector
+		{
+			var elements = document.querySelectorAll( element );
+			for(var i = 0; i < elements.length; ++i)
+			{
+				var element = elements[i];
+				if(element && element.parentNode)
+					element.parentNode.removeChild(element);
+			}
+		}
+		if( element.constructor === Array || element.constructor === NodeList ) 
+		{
+			for(var i = 0; i < element.length; ++i)
+				LiteGUI.remove( element[i] );
+		}
+		else if( element.root && element.root.parentNode ) //ltiegui widget
+			element.root.parentNode.removeChild( element.root );
+		else if( element.parentNode ) //regular HTML entity
+			element.parentNode.removeChild( element );
 	},
 
+	/**
+	* wrapper of document.getElementById
+	* @method getById
+	* @param {String} id
+	* return {HTMLEntity}
+	**/
 	getById: function(id)
 	{
 		return document.getElementById(id);
@@ -243,19 +232,25 @@ var LiteGUI = {
 
 	setWindowSize: function(w,h)
 	{
+		var style = this.root.style;
+
 		if(w && h)
 		{
-			$(this.root).css( {width: w+"px", height: h + "px", "box-shadow":"0 0 4px black"}).removeClass("fullscreen");
-
+			style.width = w+"px";
+			style.height = h + "px";
+			style.boxShadow = "0 0 4px black"
+			this.root.classList.remove("fullscreen");
 		}
 		else
 		{
-			if( $(this.root).hasClass("fullscreen") )
+			if( this.root.classList.contains("fullscreen") )
 				return;
-			$(this.root).addClass("fullscreen");
-			$(this.root).css( {width: "100%", height: "100%", "box-shadow":"0 0 0"});
+			this.root.classList.add("fullscreen");
+			style.width = "100%";
+			style.height = "100%";
+			style.boxShadow = "0 0 0";
 		}
-		$(LiteGUI).trigger("resized");
+		LiteGUI.trigger( LiteGUI, "resized");
 	},
 
 	maximizeWindow: function()
@@ -263,69 +258,121 @@ var LiteGUI = {
 		this.setWindowSize();
 	},
 
+	/**
+	* Change cursor
+	* @method setCursor
+	* @param {String} cursor
+	**/
 	setCursor: function( name )
 	{
 		this.root.style.cursor = name;
 	},
 
-	//UNDO **********************
-	max_undo_steps: 100,
-	min_time_between_undos: 500,
-	last_undo_time: 0, //to avoid doing too many undo steps simultaneously
-
-	addUndoStep: function(o)
+	/**
+	* Test if the cursor is inside an element
+	* @method setCursor
+	* @param {String} cursor
+	**/
+	isCursorOverElement: function( event, element )
 	{
-		var now =  new Date().getTime();
-		if( (now - this.last_undo_time) < this.min_time_between_undos) 
-			return;
-		this.undo_steps.push(o);
-		this.last_undo_time = now;
-		if(this.undo_steps.length > this.max_undo_steps)
-			this.undo_steps.shift();
-		LiteGUI.trigger(this.root, "new_undo", o);
+		var left = event.pageX;
+		var top = event.pageY;
+		var rect = element.getClientRects()[0];
+		if(!rect)
+			return false;
+		if(top > rect.top && top < (rect.top + rect.height) &&
+			left > rect.left && left < (rect.left + rect.width) )
+			return true;
+		return false;
 	},
 
-	doUndo: function()
+	getRect: function(element)
 	{
-		if(!this.undo_steps.length) return;
-
-		var step = this.undo_steps.pop();
-		if(step.callback != null)
-			step.callback(step.data);
-
-		LiteGUI.trigger(this.root, "undo", step);
+		return element.getClientRects()[0];
 	},
 
-	removeUndoSteps: function()
+	/**
+	* Copy a string to the clipboard (it needs to be invoqued from a click event)
+	* @method toClipboard
+	* @param {String} data
+	* @param {Boolean} force_local force to store the data in the browser clipboard (this one can be read back)
+	**/
+	toClipboard: function( object, force_local )
 	{
-		this.undo_steps = [];
-		LiteGUI.trigger(this.root, "clear_undo" );
+		if(object && object.constructor !== String )
+			object = JSON.stringify( object );
+
+		var input = null;
+		var in_clipboard = false;
+		if( !force_local )
+		try
+		{
+			var copySupported = document.queryCommandSupported('copy');
+			input = document.createElement("input");
+			input.type = "text";
+			input.style.opacity = 0;
+			input.value = object;
+			document.body.appendChild( input );
+			input.select();
+			in_clipboard = document.execCommand('copy');
+			console.log( in_clipboard ? "saved to clipboard" : "problem saving to clipboard");
+			document.body.removeChild( input );
+		} catch (err) {
+			if(input)
+				document.body.removeChild( input );
+			console.warn('Oops, unable to copy using the true clipboard');
+		}
+
+		//old system
+		localStorage.setItem("litegui_clipboard", object );
 	},
 
-	// Clipboard ******************
-
-	toClipboard: function( object )
-	{
-		if(object == null) return;
-		localStorage.setItem("litegui_clipboard", JSON.stringify( object ) );
-	},
-
-	getClipboard: function()
+	/**
+	* Reads from the secondary clipboard (only can read if the data was stored using the toClipboard)
+	* @method getLocalClipboard
+	* @return {String} clipboard
+	**/
+	getLocalClipboard: function()
 	{
 		var data = localStorage.getItem("litegui_clipboard");
-		if(!data) return null;
-		return JSON.parse(data);
+		if(!data) 
+			return null;
+		if(data[0] == "{")
+			return JSON.parse( data );
+		return data;
 	},
 
-	// CSS ************************
+	/**
+	* Insert some CSS code to the website
+	* @method addCSS
+	* @param {String|Object} code it could be a string with CSS rules, or an object with the style syntax.
+	**/
 	addCSS: function(code)
 	{
-		var style = document.createElement('style');
-		style.type = 'text/css';
-		style.innerHTML = code;
-		document.getElementsByTagName('head')[0].appendChild(style);
+		if(!code)
+			return;
+
+		if(code.constructor === String)
+		{
+			var style = document.createElement('style');
+			style.type = 'text/css';
+			style.innerHTML = code;
+			document.getElementsByTagName('head')[0].appendChild(style);
+			return;
+		}
+		else
+		{
+			for(var i in code)
+			document.body.style[i] = code[i];
+		}
 	},
 
+	/**
+	* Requires a new CSS
+	* @method requireCSS
+	* @param {String} url string with url or an array with several urls
+	* @param {Function} on_complete
+	**/
 	requireCSS: function(url, on_complete)
 	{
 		if(typeof(url)=="string")
@@ -346,6 +393,12 @@ var LiteGUI = {
 		}
 	},
 
+	/**
+	* Request file from url (it could be a binary, text, etc.). If you want a simplied version use 
+	* @method request
+	* @param {Object} request object with all the parameters like data (for sending forms), dataType, success, error
+	* @param {Function} on_complete
+	**/
 	request: function(request)
 	{
 		var dataType = request.dataType || "text";
@@ -409,7 +462,7 @@ var LiteGUI = {
 				}
 			}
 			if(request.success)
-				request.success.call(this, response);
+				request.success.call(this, response, this);
 		};
         xhr.onerror = function(err) {
 			if(request.error)
@@ -419,13 +472,63 @@ var LiteGUI = {
 		return xhr;
 	},	
 
-	requireScript: function(url, on_complete, on_progress, on_error )
+	/**
+	* Request file from url
+	* @method requestText
+	* @param {String} url
+	* @param {Function} on_complete
+	* @param {Function} on_error
+	**/
+	requestText: function(url, on_complete, on_error )
 	{
-		if(typeof(url)=="string")
+		return this.request({ url: url, dataType:"text", success: on_complete, error: on_error });
+	},
+
+	/**
+	* Request file from url
+	* @method requestJSON
+	* @param {String} url
+	* @param {Function} on_complete
+	* @param {Function} on_error
+	**/
+	requestJSON: function(url, on_complete, on_error )
+	{
+		return this.request({ url: url, dataType:"json", success: on_complete, error: on_error });
+	},
+
+	/**
+	* Request binary file from url
+	* @method requestBinary
+	* @param {String} url
+	* @param {Function} on_complete
+	* @param {Function} on_error
+	**/
+	requestBinary: function(url, on_complete, on_error )
+	{
+		return this.request({ url: url, dataType:"binary", success: on_complete, error: on_error });
+	},
+	
+	
+	/**
+	* Request script and inserts it in the DOM
+	* @method requireScript
+	* @param {String|Array} url the url of the script or an array containing several urls
+	* @param {Function} on_complete
+	* @param {Function} on_error
+	* @param {Function} on_progress (if several files are required, on_progress is called after every file is added to the DOM)
+	**/
+	requireScript: function(url, on_complete, on_error, on_progress )
+	{
+		if(!url)
+			throw("invalid URL");
+
+		if( url.constructor === String )
 			url = [url];
 
 		var total = url.length;
 		var size = total;
+		var loaded_scripts = [];
+
 		for(var i in url)
 		{
 			var script = document.createElement('script');
@@ -435,13 +538,14 @@ var LiteGUI = {
 			script.async = false;
 			script.onload = function(e) { 
 				total--;
+				loaded_scripts.push(this);
 				if(total)
 				{
 					if(on_progress)
 						on_progress(this.src, this.num);
 				}
 				else if(on_complete)
-					on_complete();
+					on_complete( loaded_scripts );
 			};
 			if(on_error)
 				script.onerror = function(err) { 
@@ -458,6 +562,7 @@ var LiteGUI = {
 		if(typeof(url)=="string")
 			url = [url];
 
+		var loaded_scripts = [];
 		function addScript()
 		{
 			var script = document.createElement('script');
@@ -472,9 +577,11 @@ var LiteGUI = {
 					addScript();
 					return;
 				}
+
+				loaded_scripts.push(this);
 				
 				if(on_complete)
-					on_complete();
+					on_complete( loaded_scripts );
 			};
 			document.getElementsByTagName('head')[0].appendChild(script);
 		}
@@ -487,26 +594,90 @@ var LiteGUI = {
 		return this.createElement("div",id,code);
 	},
 
-	createElement: function(tag, id, content)
+	/**
+	* Request script and inserts it in the DOM
+	* @method createElement
+	* @param {String} tag
+	* @param {String} id_class string containing id and classes, example: "myid .someclass .anotherclass"
+	* @param {String} content
+	* @param {Object} style
+	**/
+	createElement: function(tag, id_class, content, style, events)
 	{
 		var elem = document.createElement( tag );
-		elem.id = id;
+		if(id_class)
+		{
+			var t = id_class.split(" ");
+			for(var i = 0; i < t.length; i++)
+			{
+				if(t[i][0] == ".")
+					elem.classList.add( t[i].substr(1) );
+				else if(t[i][0] == "#")
+					elem.id = t[i].substr(1);
+				else
+					elem.id = t[i];
+			}
+		}
 		elem.root = elem;
-		if(content !== undefined)
+		if(content)
 			elem.innerHTML = content;
 		elem.add = function(v) { this.appendChild( v.root || v ); };
+
+		if(style)
+		{
+			if(style.constructor === String)
+				elem.setAttribute("style",style);
+			else
+				for(var i in style)
+					elem.style[i] = style[i];
+		}
+
+		if(events)
+		{
+			for(var i in events)
+				elem.addEventListener(i, events[i]);
+		}
 		return elem;
 	},
 
-	createButton: function( id, content, callback )
+	/**
+	* Request script and inserts it in the DOM
+	* @method createButton
+	* @param {String} id
+	* @param {String} content
+	* @param {Function} callback when the button is pressed
+	* @param {Object|String} style
+	**/
+	createButton: function( id_class, content, callback, style )
 	{
 		var elem = document.createElement("button");
-		elem.id = id;
+		elem.className = "litegui litebutton button";
+		if(id_class)
+		{
+			var t = id_class.split(" ");
+			for(var i = 0; i < t.length; i++)
+			{
+				if(t[i][0] == ".")
+					elem.classList.add( t[i].substr(1) );
+				else if(t[i][0] == "#")
+					elem.id = t[i].substr(1);
+				else
+					elem.id = t[i];
+			}
+		}
 		elem.root = elem;
 		if(content !== undefined)
 			elem.innerHTML = content;
 		if(callback)
 			elem.addEventListener("click", callback );
+		if(style)
+		{
+			if(style.constructor === String)
+				elem.setAttribute("style",style);
+			else
+				for(var i in style)
+					elem.style[i] = style[i];
+		}
 		return elem;
 	},
 
@@ -543,7 +714,8 @@ var LiteGUI = {
 	//* DIALOGS *******************
 	showModalBackground: function(v)
 	{
-		LiteGUI.modalbg_div.style.display = v ? "block" : "none";
+		if(LiteGUI.modalbg_div)
+			LiteGUI.modalbg_div.style.display = v ? "block" : "none";
 	},
 
 	showMessage: function(content, options)
@@ -553,14 +725,20 @@ var LiteGUI = {
 		options.title = options.title || "Attention";
 		options.content = content;
 		options.close = 'fade';
-		var dialog = new LiteGUI.Dialog("info_message",options);
+		var dialog = new LiteGUI.Dialog(null,options);
 		if(!options.noclose)
 			dialog.addButton("Close",{ close: true });
 		dialog.makeModal('fade');
 		return dialog;
 	},
 
-	popup: function(content,options)
+	/**
+	* Shows a dialog with a message
+	* @method popup
+	* @param {String} content
+	* @param {Object} options ( min_height, content, noclose )
+	**/
+	popup: function( content, options )
 	{
 		options = options || {};
 
@@ -579,31 +757,45 @@ var LiteGUI = {
 	},
 
 
-	alert: function(content,options)
+	/**
+	* Shows an alert dialog with a message
+	* @method alert
+	* @param {String} content
+	* @param {Object} options ( title, width, height, content, noclose )
+	**/
+	alert: function( content, options )
 	{
 		options = options || {};
 
+		
 		options.className = "alert";
-		options.title = "Alert";
-		options.width = 280;
-		options.height = 140;
+		options.title = options.title || "Alert";
+		options.width = options.width || 280;
+		options.height = options.height || 140;
 		if (typeof(content) == "string")
 			content = "<p>" + content + "</p>";
-		$(".litepanel.alert").remove(); //kill other panels
-		return this.showMessage(content,options);
+		LiteGUI.remove(".litepanel.alert"); //kill other panels
+		return LiteGUI.showMessage(content,options);
 	},
 
+	/**
+	* Shows a confirm dialog with a message
+	* @method confirm
+	* @param {String} content
+	* @param {Function} callback
+	* @param {Object} options ( title, width, height, content, noclose )
+	**/
 	confirm: function(content, callback, options)
 	{
 		options = options || {};
 		options.className = "alert";
-		options.title = "Confirm";
-		options.width = 280;
+		options.title = options.title || "Confirm";
+		options.width = options.width || 280;
 		//options.height = 100;
 		if (typeof(content) == "string")
 			content = "<p>" + content + "</p>";
 
-		content +="<button data-value='yes' style='width:45%; margin-left: 10px'>Yes</button><button data-value='no' style='width:45%'>No</button>";
+		content +="<button class='litebutton' data-value='yes' style='width:45%; margin-left: 10px'>Yes</button><button class='litebutton' data-value='no' style='width:45%'>No</button>";
 		options.noclose = true;
 
 		var dialog = this.showMessage(content,options);
@@ -614,20 +806,28 @@ var LiteGUI = {
 
 		function inner(v) {
 			var v = this.dataset["value"] == "yes";
+			dialog.close(); //close before callback
 			if(callback) 
 				callback(v);
-			dialog.close();
 		}
 
 		return dialog;
 	},
 
-	prompt: function(content, callback, options )
+	/**
+	* Shows a prompt dialog with a message
+	* @method prompt
+	* @param {String} content
+	* @param {Function} callback
+	* @param {Object} options ( title, width, height, content, noclose )
+	**/
+	prompt: function( content, callback, options )
 	{
 		options = options || {};
 		options.className = "alert";
-		options.title = "Prompt" || options.title;
-		options.width = 280;
+		options.title = options.title || "Prompt";
+		options.width = options.width || 280;
+
 		//options.height = 140 + (options.textarea ? 40 : 0);
 		if (typeof(content) == "string")
 			content = "<p>" + content + "</p>";
@@ -637,31 +837,90 @@ var LiteGUI = {
 		if (options.textarea)
 			textinput = "<textarea class='textfield' style='width:95%'>"+value+"</textarea>";
 
-		content +="<p>"+textinput+"</p><button data-value='accept' style='width:45%; margin-left: 10px; margin-bottom: 10px'>Accept</button><button data-value='cancel' style='width:45%'>Cancel</button>";
+		content +="<p>"+textinput+"</p><button class='litebutton' data-value='accept' style='width:45%; margin-left: 10px; margin-bottom: 10px'>Accept</button><button class='litebutton' data-value='cancel' style='width:45%'>Cancel</button>";
 		options.noclose = true;
-		var dialog = this.showMessage(content,options);
+		var dialog = this.showMessage( content, options );
 
 		var buttons = dialog.content.querySelectorAll("button");
 		for(var i = 0; i < buttons.length; i++)
 			buttons[i].addEventListener("click", inner);
 
-		function inner() {
-			var value = dialog.content.querySelector("input,textarea").value;
-			if(this.dataset["value"] == "cancel")
-				value = null;
+		var input = dialog.content.querySelector("input,textarea");
+		input.addEventListener("keydown", inner_key, true);
 
+		function inner() {
+			var value = input.value;
+			if(this.dataset && this.dataset["value"] == "cancel")
+				value = null;
+			dialog.close(); //close before callback
 			if(callback)
 				callback( value );
-			dialog.close();
 		};
 
-		var elem = dialog.content.querySelector("input,textarea");
-		elem.focus();
+		function inner_key(e)
+		{
+			if (!e)
+				e = window.event;
+			var keyCode = e.keyCode || e.which;
+			if (keyCode == '13'){
+				inner();
+				return false;
+			}		
+			if (keyCode == '29')
+				dialog.close();
+		};
 
+		input.focus();
 		return dialog;
 	},
 
-	//Add support to get variables from the URL
+	downloadURL: function( url, filename )
+	{
+		var link = document.createElement('a');
+		link.href = url;
+		link.download = filename;
+		document.body.appendChild(link);
+		link.click();
+		document.body.removeChild(link);
+	},
+
+	downloadFile: function( filename, data, dataType )
+	{
+		if(!data)
+		{
+			console.warn("No file provided to download");
+			return;
+		}
+
+		if(!dataType)
+		{
+			if(data.constructor === String )
+				dataType = 'text/plain';
+			else
+				dataType = 'application/octet-stream';
+		}
+
+		var file = null;
+		if(data.constructor !== File && data.constructor !== Blob)
+			file = new Blob( [ data ], {type : dataType});
+		else
+			file = data;
+
+		var url = URL.createObjectURL( file );
+		var element = document.createElement("a");
+		element.setAttribute('href', url);
+		element.setAttribute('download', filename );
+		element.style.display = 'none';
+		document.body.appendChild(element);
+		element.click();
+		document.body.removeChild(element);
+		setTimeout( function(){ URL.revokeObjectURL( url ); }, 1000*60 ); //wait one minute to revoke url
+	},
+
+	/**
+	* Returns the URL vars ( ?foo=faa&foo2=etc )
+	* @method getUrlVars
+	**/
 	getUrlVars: function(){
 		var vars = [], hash;
 		var hashes = window.location.href.slice(window.location.href.indexOf('?') + 1).split('&');
@@ -683,7 +942,18 @@ var LiteGUI = {
 		element.focus();
 	},
 
-	draggable: function(container, dragger)
+	blur: function( element )
+	{
+		element.blur();
+	},
+
+	/**
+	* Makes one element draggable
+	* @method draggable
+	* @param {HTMLEntity} container the element that will be dragged
+	* @param {HTMLEntity} dragger the area to start the dragging
+	**/
+	draggable: function( container, dragger, on_start, on_finish, on_is_draggable )
 	{
 		dragger = dragger || container;
 		dragger.addEventListener("mousedown", inner_mouse);
@@ -710,10 +980,19 @@ var LiteGUI = {
 					y = rect ? rect.top : 0;
 				}
 
+				if(on_is_draggable && on_is_draggable(container,e) == false )
+				{
+					e.stopPropagation();
+					e.preventDefault();
+					return false;
+				}
+
 				prev_x = e.clientX;
 				prev_y = e.clientY;
 				document.addEventListener("mousemove",inner_mouse);
 				document.addEventListener("mouseup",inner_mouse);
+				if(on_start)
+					on_start( container, e );
 				e.stopPropagation();
 				e.preventDefault();
 				return false;
@@ -723,6 +1002,9 @@ var LiteGUI = {
 			{
 				document.removeEventListener("mousemove",inner_mouse);
 				document.removeEventListener("mouseup",inner_mouse);
+
+				if( on_finish )
+					on_finish( container, e );
 				return;
 			}
 
@@ -740,7 +1022,12 @@ var LiteGUI = {
 		}
 	},
 
-	//extracted from LiteScene
+	/**
+	* Clones object content
+	* @method cloneObject
+	* @param {Object} object
+	* @param {Object} target
+	**/
 	cloneObject: function(object, target)
 	{
 		var o = target || {};
@@ -779,6 +1066,98 @@ var LiteGUI = {
 			}
 		}
 		return o;
+	},
+
+	safeName: function( str )
+	{
+		return String(str).replace(/[\s\.]/g, '');
+	},
+
+	//those useful HTML unicode codes that I never remeber but I always need
+	special_codes: {
+		close: "&#10005;",
+		navicon: "&#9776;",
+		refresh: "&#8634;",
+		gear: "&#9881;",
+		open_folder: "&#128194;"
+	},
+	
+	//given a html entity string it returns the equivalent unicode character
+	htmlEncode: function( html_code )
+	{
+		var e = document.createElement("div");
+		e.innerHTML = html_code;
+		return e.innerText;
+	},
+
+	//given a unicode character it returns the equivalent html encoded string
+	htmlDecode: function( unicode_character )
+	{
+		var e = document.createElement("div");
+		e.innerText = unicode_character;
+		return e.innerHTML;
+	},
+
+	/**
+	* Convert sizes in any format to a valid CSS format (number to string, negative number to calc( 100% - number px )
+	* @method sizeToCSS
+	* @param {String||Number} size
+	* @return {String} valid css size string
+	**/
+	sizeToCSS: function( v )
+	{
+		if( v ===  undefined || v === null )
+			return null;
+		if(v.constructor === String )
+			return v;
+		if(v >= 0 )
+			return (v|0) + "px";
+		return "calc( 100% - " + Math.abs(v|0) + "px )";
+	},
+
+	/**
+	* Helper, makes drag and drop easier by enabling drag and drop in a given element
+	* @method createDropArea
+	* @param {HTMLElement} element the element where users could drop items
+	* @param {Function} callback_drop function to call when the user drops the item
+	* @param {Function} callback_enter [optional] function to call when the user drags something inside
+	**/
+	createDropArea: function( element, callback_drop, callback_enter, callback_exit )
+	{
+		element.addEventListener("dragenter", onDragEvent);
+
+		function onDragEvent(evt)
+		{
+			element.addEventListener("dragexit", onDragEvent);
+			element.addEventListener("dragover", onDragEvent);
+			element.addEventListener("drop", onDrop);
+			evt.stopPropagation();
+			evt.preventDefault();
+			if(evt.type == "dragenter" && callback_enter)
+				callback_enter(evt, this);
+			if(evt.type == "dragexit" && callback_exit)
+				callback_exit(evt, this);
+		}
+
+		function onDrop(evt)
+		{
+			evt.stopPropagation();
+			evt.preventDefault();
+
+			element.removeEventListener("dragexit", onDragEvent);
+			element.removeEventListener("dragover", onDragEvent);
+			element.removeEventListener("drop", onDrop);
+
+			var r = undefined;
+			if(callback_drop)
+				r = callback_drop(evt);
+			if(r)
+			{
+				evt.stopPropagation();
+				evt.stopImmediatePropagation();
+				return true;
+			}
+		}
 	}
 };
 
@@ -1170,6 +1549,23 @@ function beautifyJSON( code, skip_css )
 
 	return code;
 }
+
+function dataURItoBlob( dataURI ) {
+	var pos = dataURI.indexOf(",");
+	//convert to binary
+    var byteString = atob( dataURI.substr(pos+1) ); 
+	//copy from string to array
+    var ab = new ArrayBuffer( byteString.length ); 
+    var ia = new Uint8Array(ab);
+	var l = byteString.length;
+    for (var i = 0; i < l; i++) {
+        ia[i] = byteString.charCodeAt(i);
+    }
+
+	var mime = dataURI.substr(5,pos-5);
+	mime = mime.substr(0, mime.length - 7); //strip ";base64"
+    return new Blob([ab], { type: mime });
+}
 //enclose in a scope
 (function(){
 
@@ -1187,6 +1583,7 @@ function beautifyJSON( code, skip_css )
 
 		this.root = element;
 		var button = document.createElement("button");
+		button.className = "litebutton";
 		this.content = button;
 		element.appendChild(button);
 
@@ -1238,26 +1635,39 @@ function beautifyJSON( code, skip_css )
 
 
 	/**
-	* ContextualMenu 
+	* ContextMenu 
 	*
-	* @class ContextualMenu
+	* @class ContextMenu 
 	* @constructor
 	* @param {Array} values (allows object { title: "Nice text", callback: function ... })
+	* @param {Object} options [optional] Some options:\
+	* - title: title to show on top of the menu
+	* - callback: function to call when an option is clicked, it receives the item information
+	* - ignore_item_callbacks: ignores the callback inside the item, it just calls the options.callback 
+	* - event: you can pass a MouseEvent, this way the ContextMenu appears in that position
 	*/
-	function ContextualMenu(values,options)
+	function ContextMenu( values, options )
 	{
 		options = options || {};
 		this.options = options;
 		var that = this;
 
+		//to link a menu with its parent
+		if(options.parentMenu)
+		{
+			this.parentMenu = options.parentMenu;
+			this.parentMenu.lock = true;
+			this.parentMenu.current_submenu = this;
+		}
+
 		var root = document.createElement("div");
-		root.className = "litecontextualmenu litemenubar-panel";
+		root.className = "litecontextmenu litemenubar-panel";
 		root.style.minWidth = 100;
 		root.style.minHeight = 100;
 		root.style.pointerEvents = "none";
-		setTimeout(function() { root.style.pointerEvents = "auto"; },100); //delay so the mouse up event is not caugh by this element
+		setTimeout( function() { root.style.pointerEvents = "auto"; },100); //delay so the mouse up event is not caugh by this element
 
-		//this prevents the default contextual browser menu to open in case this menu was created when pressing right button 
+		//this prevents the default context browser menu to open in case this menu was created when pressing right button 
 		root.addEventListener("mouseup", function(e){ 
 			e.preventDefault(); return true; 
 		}, true);
@@ -1268,9 +1678,28 @@ function beautifyJSON( code, skip_css )
 			return false;
 		},true);
 
+		root.addEventListener("mousedown", function(e){ 
+			if(e.button == 2)
+			{
+				that.close();
+				e.preventDefault(); return true; 
+			}
+		}, true);
+
 
 		this.root = root;
-		
+
+		//title
+		if(options.title)
+		{
+			var element = document.createElement("div");
+			element.className = "litemenu-title";
+			element.innerHTML = options.title;
+			root.appendChild(element);
+		}
+
+		//entries
+		var num = 0;
 		for(var i in values)
 		{
 			var element = document.createElement("div");
@@ -1279,10 +1708,12 @@ function beautifyJSON( code, skip_css )
 			var name = values.constructor == Array ? values[i] : i;
 			var value = values[i];
 
+			var disabled = false;
+
 			if(value === null)
 			{
-				element.className += "separator";
-				element.innerHTML = "<hr/>"
+				element.classList.add("separator");
+				//element.innerHTML = "<hr/>"
 				//continue;
 			}
 			else
@@ -1290,73 +1721,161 @@ function beautifyJSON( code, skip_css )
 				element.innerHTML = value && value.title ? value.title : name;
 				element.value = value;
 
+				if(value)
+				{
+					if(value.disabled)
+					{
+						disabled = true;
+						element.classList.add("disabled");
+					}
+					if(value.submenu || value.has_submenu)
+						element.classList.add("has_submenu");
+				}
+
 				if(typeof(value) == "function")
 				{
 					element.dataset["value"] = name;
 					element.onclick_callback = value;
-				}
-				else if(typeof(value) == "object")
-				{
-					if(value.callback)
-						element.addEventListener("click", function(e) { this.value.callback.apply( this, this.value ); });
 				}
 				else
 					element.dataset["value"] = value;
 			}
 
 			root.appendChild(element);
-			element.addEventListener("click", inner_onclick);
+			if(!disabled)
+				element.addEventListener("click", inner_onclick);
+			if(options.autoopen)
+				element.addEventListener("mouseenter", inner_over);
+			num++;
 		}
 
-		//option clicked
+		function inner_over(e)
+		{
+			var value = this.value;
+			if(!value || !value.has_submenu)
+				return;
+			inner_onclick.call(this,e);
+		}
+
+		//menu option clicked
 		function inner_onclick(e) {
 			var value = this.value;
-			if(options.callback)
-				options.callback.call(that, value, options );
-			if(root.parentNode)
-				root.parentNode.removeChild( root );
+			var close_parent = true;
+
+			if(that.current_submenu)
+				that.current_submenu.close(e);
+
+			//global callback
+			if(options.callback) 
+			{
+				var r = options.callback.call(that, value, options, e );
+				if(r === true)
+					close_parent = false;
+			}
+
+			//special cases
+			if(value)
+			{
+				if (value.callback && !options.ignore_item_callbacks && value.disabled !== true )  //item callback
+				{
+					var r = value.callback.call( this, value, options, e );
+					if(r === true)
+						close_parent = false;
+				}
+				if(value.submenu)
+				{
+					if(!value.submenu.options)
+						throw("ContextMenu submenu needs options");
+					var submenu = new LiteGUI.ContextMenu( value.submenu.options, {
+						callback: value.submenu.callback,
+						event: e,
+						parentMenu: that,
+						ignore_item_callbacks: value.submenu.ignore_item_callbacks,
+						title: value.submenu.title,
+						autoopen: options.autoopen
+					});
+					close_parent = false;
+				}
+			}
+		
+			if(close_parent && !that.lock)
+				that.close();
 		}
 
-		//if(0)
+		//close on leave
 		root.addEventListener("mouseleave", function(e) {
-			if(this.parentNode)
-				this.parentNode.removeChild( this );
+			if(that.lock)
+				return;
+			that.close(e);
 		});
 
 		//insert before checking position
-		document.body.appendChild(root);
+		var root_document = document;
+		if(options.event)
+			root_document = options.event.target.ownerDocument; 
 
+		if(!root_document)
+			root_document = document;
+		root_document.body.appendChild(root);
+
+		//compute best position
 		var left = options.left || 0;
 		var top = options.top || 0;
 		if(options.event)
 		{
 			left = (options.event.pageX - 10);
 			top = (options.event.pageY - 10);
+			if(options.title)
+				top -= 20;
 
-			var rect = document.body.getClientRects()[0];
-			if(left > (rect.width - $(root).width() - 10))
-				left = (rect.width - $(root).width() - 10);
-			if(top > (rect.height - $(root).height() - 10))
-				top = (rect.height - $(root).height() - 10);
+			if(options.parentMenu)
+				left = $(options.parentMenu.root).position().left + $(options.parentMenu.root).width();
+
+			var body_rect = LiteGUI.getRect( document.body );
+			var root_rect = LiteGUI.getRect( root );
+
+			if(left > (body_rect.width - root_rect.width - 10))
+				left = (body_rect.width - root_rect.width - 10);
+			if(top > (body_rect.height - root_rect.height - 10))
+				top = (body_rect.height - root_rect.height - 10);
 		}
 
 		root.style.left = left + "px";
 		root.style.top = top  + "px";
 	}
 
-	LiteGUI.ContextualMenu = ContextualMenu;
+	ContextMenu.prototype.close = function(e, ignore_parent_menu)
+	{
+		if(this.root.parentNode)
+			this.root.parentNode.removeChild( this.root );
+		if(this.parentMenu && !ignore_parent_menu)
+		{
+			this.parentMenu.lock = false;
+			this.parentMenu.current_submenu = null;
+			if( e === undefined )
+				this.parentMenu.close();
+			else if( e && !LiteGUI.isCursorOverElement( e, this.parentMenu.root) )
+				LiteGUI.trigger( this.parentMenu.root, "mouseleave", e );
+		}
+		if(this.current_submenu)
+			this.current_submenu.close(e, true);
+	}
+
+	LiteGUI.ContextMenu = ContextMenu;
+	LiteGUI.ContextualMenu = ContextMenu; //LEGACY: REMOVE
 
 
 	//the tiny box to expand the children of a node
 	function Checkbox( value, on_change)
 	{
 		var that = this;
+		this.value = value;
 
 		var root = this.root = document.createElement("span");
 		root.className = "litecheckbox inputfield";
 		root.dataset["value"] = value;
 
-		var element = this.element =document.createElement("span");
+		var element = this.element = document.createElement("span");
 		element.className = "fixed flag checkbox "+(value ? "on" : "off");
 		root.appendChild( element );
 		
@@ -1370,6 +1889,9 @@ function beautifyJSON( code, skip_css )
 
 		this.setValue = function(v)
 		{
+			if(this.value === v)
+				return;
+
 			if( this.root.dataset["value"] == v.toString())
 				return;
 
@@ -1384,14 +1906,17 @@ function beautifyJSON( code, skip_css )
 				this.element.classList.remove("on");
 				this.element.classList.add("off");
 			}
+			var old_value = this.value;
+			this.value = v;
 
 			if(on_change)
-				on_change( v );
+				on_change( v, old_value );
 		}
 
 		this.getValue = function()
 		{
-			return this.root.dataset["value"] == "true";
+			return this.value;
+			//return this.root.dataset["value"] == "true";
 		}
 	}	
 
@@ -1414,6 +1939,16 @@ function beautifyJSON( code, skip_css )
 				this.classList.add("empty");
 			else
 				this.classList.remove("empty");
+		}
+
+		element.expand = function()
+		{
+			this.setValue(true);
+		}
+
+		element.collapse = function()
+		{
+			this.setValue(false);
 		}
 
 		element.setValue = function(v)
@@ -1446,7 +1981,7 @@ function beautifyJSON( code, skip_css )
 		}
 
 		function onClick(e) {
-			console.log("CLICK");
+			//console.log("CLICK");
 			var box = e.target;
 			box.setValue( this.dataset["value"] == "open" ? false : true );
 			if(this.stopPropagation)
@@ -1467,12 +2002,11 @@ function beautifyJSON( code, skip_css )
 	* @param {Array} values
 	* @param {Object} options
 	*/
-	function List(id,items,options)
+	function List( id, items, options )
 	{
 		options = options || {};
 
-		var root = document.createElement("ul");
-		this.root = root;
+		var root = this.root = document.createElement("ul");
 		root.id = id;
 		root.className = "litelist";
 		this.items = [];
@@ -1486,6 +2020,7 @@ function beautifyJSON( code, skip_css )
 			var item = document.createElement("li");
 			item.className = "list-item";
 			item.data = items[i];
+			item.dataset["value"] = items[i];
 
 			var content = "";
 			if(typeof(items[i]) == "string")
@@ -1493,28 +2028,49 @@ function beautifyJSON( code, skip_css )
 			else
 			{
 				content = (items[i].name || items[i].title || "") + "<span class='arrow'></span>";
-				if(items[i].id)	item.id = items[i].id;
+				if(items[i].id)
+					item.id = items[i].id;
 			}
 			item.innerHTML = content;
+
+			item.addEventListener("click", function() {
+
+				$(root).find(".list-item.selected").removeClass("selected");
+				this.classList.add("selected");
+				$(that.root).trigger("wchanged", this);
+				if(that.callback)
+					that.callback( this.data  );
+			});
 
 			root.appendChild(item);
 		}
 
-		$(root).find(".list-item").click( function() {
-			$(root).find(".list-item.selected").removeClass("selected");
-			$(this).addClass("selected");
-
-			$(that.root).trigger("wchanged", this);
-			if(that.callback)
-				that.callback( this.data  );
-		});
 
 		if(options.parent)
 		{
 			if(options.parent.root)
-				$(options.parent.root).append(root);
+				options.parent.root.appendChild( root );
 			else
-				$(options.parent).append(root);
+				options.parent.appendChild( root );
+		}
+	}
+
+	List.prototype.getSelectedItem = function()
+	{
+		return this.root.querySelector(".list-item.selected");
+	}
+
+	List.prototype.setSelectedItem = function( name )
+	{
+		var items = this.root.querySelectorAll(".list-item");
+		for(var i = 0; i < items.length; i++)
+		{
+			var item = items[i];
+			if(item.data == name)
+			{
+				LiteGUI.trigger( item, "click" );
+				break;
+			}
 		}
 	}
 
@@ -1542,7 +2098,7 @@ function beautifyJSON( code, skip_css )
 		var that = this;
 		this.value = value;
 
-		this.setValue = function(value)
+		this.setValue = function(value, skip_event)
 		{
 			//var width = canvas.getClientRects()[0].width;
 			var ctx = canvas.getContext("2d");
@@ -1561,7 +2117,12 @@ function beautifyJSON( code, skip_css )
 			if(value != this.value)
 			{
 				this.value = value;
-				$(this.root).trigger("change", value );
+				if(!skip_event)
+				{
+					LiteGUI.trigger(this.root, "change", value );
+					if(this.onChange)
+						this.onChange( value );
+				}
 			}
 		}
 
@@ -1575,13 +2136,16 @@ function beautifyJSON( code, skip_css )
 			that.setValue( range * norm + min );
 		}
 
+		var doc_binded = null;
+
 		canvas.addEventListener("mousedown", function(e) {
 			var mouseX, mouseY;
 			if(e.offsetX) { mouseX = e.offsetX; mouseY = e.offsetY; }
 			else if(e.layerX) { mouseX = e.layerX; mouseY = e.layerY; }	
 			setFromX(mouseX);
-			document.addEventListener("mousemove", onMouseMove );
-			document.addEventListener("mouseup", onMouseUp );
+			doc_binded = canvas.ownerDocument;
+			doc_binded.addEventListener("mousemove", onMouseMove );
+			doc_binded.addEventListener("mouseup", onMouseUp );
     	});
 
 		function onMouseMove(e)
@@ -1596,8 +2160,10 @@ function beautifyJSON( code, skip_css )
 
 		function onMouseUp(e)
 		{
-			document.removeEventListener("mousemove", onMouseMove );
-			document.removeEventListener("mouseup", onMouseUp );
+			var doc = doc_binded || document;
+			doc_binded = null;
+			doc.removeEventListener("mousemove", onMouseMove );
+			doc.removeEventListener("mouseup", onMouseUp );
 			e.preventDefault();
 			return false;
 		}
@@ -1915,20 +2481,34 @@ function beautifyJSON( code, skip_css )
 
 	
 	/****************** AREA **************/
-	/**
+	/** An Area is am streched container.
 	* Areas can be split several times horizontally or vertically to fit different colums or rows
 	*
 	* @class Area
 	* @constructor
+	* @param {String} id
+	* @param {Object} options
 	*/
-	function Area(id, options)
+	function Area( id, options )
 	{
+		if(!options && id && id.constructor !== String)
+		{
+			options = id;
+			id = null;
+		}
+
 		options = options || {};
 		/* the root element containing all sections */
-		var element = document.createElement("div");
-		element.className = "litearea";
-		if(id) element.id = id;
-		this.root = element;
+		var root = document.createElement("div");
+		root.className = "litearea";
+		if(id)
+			root.id = id;
+		if(options.id)
+			root.id = id;
+		if(options.className)
+			root.className +=  " " + options.className;
+
+		this.root = root;
 		this.root.litearea = this; //dbl link
 
 		var width = options.width || "100%";
@@ -1939,16 +2519,17 @@ function beautifyJSON( code, skip_css )
 		if( height < 0 )
 			height = 'calc( 100% - '+ Math.abs(height)+'px)';
 
-		element.style.width = width;
-		element.style.height = height;
+		root.style.width = width;
+		root.style.height = height;
 
 		this.options = options;
 
 		var that = this;
-		window.addEventListener("resize",function(e) { that.resize(e); });
+		//window.addEventListener("resize",function(e) { that.onResize(e); });
 		//$(this).bind("resize",function(e) { that.resize(e); });
 
-		this._computed_size = [ $(this.root).width(), $(this.root).height() ];
+		//this._computed_size = [ $(this.root).width(), $(this.root).height() ];
+		this._computed_size = [ this.root.offsetWidth, this.root.offserHeight ];
 
 		var content = document.createElement("div");
 		if(options.content_id)
@@ -1956,15 +2537,15 @@ function beautifyJSON( code, skip_css )
 		content.className = "liteareacontent";
 		content.style.width = "100%";
 		content.style.height = "100%";
-		this.root.appendChild(content);
+		this.root.appendChild( content );
 		this.content = content;
 
 		this.split_direction = "none";
 		this.sections = [];
 
 		if(options.autoresize)
-			$(LiteGUI).bind("resized", function() { 
-				that.resize(); 
+			LiteGUI.bind( LiteGUI, "resized", function() { 
+				that.onResize(); 
 			});
 	}
 
@@ -1979,13 +2560,61 @@ function beautifyJSON( code, skip_css )
 		return null;
 	}
 
-	Area.prototype.resize = function(e)
+	Area.prototype.onResize = function(e)
 	{
-		var computed_size = [ $(this.root).width(), $(this.root).height() ];
+		//this._computed_size = [ $(this.root).width(), $(this.root).height() ];
+		var computed_size = [ this.root.offsetWidth, this.root.offsetHeight ];
 		if( e && this._computed_size && computed_size[0] == this._computed_size[0] && computed_size[1] == this._computed_size[1])
 			return;
 
 		this.sendResizeEvent(e);
+	}
+
+	//sends the resize event to all the sections
+	Area.prototype.sendResizeEvent = function(e)
+	{
+		if(this.sections.length)
+			for(var i in this.sections)
+			{
+				var section = this.sections[i];
+				section.onResize(e);
+				//$(section).trigger("resize"); //it is a LiteArea
+				//$(section.root).trigger("resize");
+				/*
+				for (var j = 0; j < section.root.childNodes.length; j++)
+					$(section.root.childNodes[j]).trigger("resize");
+				*/
+			}
+		else //send it to the children
+		{
+			for (var j = 0; j < this.root.childNodes.length; j++)
+			{
+				var element = this.root.childNodes[j];
+				if(element.litearea)
+					element.litearea.onResize();
+				else
+					LiteGUI.trigger( element, "resize" );
+			}
+		}
+
+		//inner callback
+		if( this.onresize )
+			this.onresize();
+	}
+
+	Area.prototype.getWidth = function()
+	{
+		return this.root.offsetWidth;
+	}
+
+	Area.prototype.getHeight = function()
+	{
+		return this.root.offsetHeight;
+	}
+
+	Area.prototype.isVisible = function()
+	{
+		return this.root.style.display != "none";	
 	}
 
 	Area.prototype.adjustHeight = function()
@@ -2006,41 +2635,19 @@ function beautifyJSON( code, skip_css )
 		this.root.style.height = "calc( 100% - " + y + "px )";
 	}
 
-	Area.prototype.sendResizeEvent = function(e)
+	Area.prototype.split = function( direction, sizes, editable )
 	{
+		if( !direction || direction.constructor !== String )
+			throw ("First parameter must be a string: 'vertical' or 'horizontal'");
+
+		if( !sizes )
+			throw ("sizes must be an array");
+
+		if( direction != "vertical" && direction != "horizontal" )
+			throw ("First parameter must be a string: 'vertical' or 'horizontal'");
+
 		if(this.sections.length)
-			for(var i in this.sections)
-			{
-				var section = this.sections[i];
-				section.resize(e);
-				//$(section).trigger("resize"); //it is a LiteArea
-				//$(section.root).trigger("resize");
-				/*
-				for (var j = 0; j < section.root.childNodes.length; j++)
-					$(section.root.childNodes[j]).trigger("resize");
-				*/
-			}
-		else //send it to the children
-		{
-			for (var j = 0; j < this.root.childNodes.length; j++)
-			{
-				var element = this.root.childNodes[j];
-				if(element.litearea)
-					element.litearea.resize();
-				else
-					$(element).trigger("resize");
-			}
-		}
-
-		if( this.onresize )
-			this.onresize();
-	}
-
-	Area.prototype.split = function(direction, sizes, editable)
-	{
-		direction = direction || "vertical";
-
-		if(this.sections.length) throw "cannot split twice";
+			throw "cannot split twice";
 
 		//create areas
 		var area1 = new LiteGUI.Area(null, { content_id: this.content.id });
@@ -2201,8 +2808,8 @@ function beautifyJSON( code, skip_css )
 			last_pos[1] = e.pageY;
 			e.stopPropagation();
 			e.preventDefault();
-			if(that.options.inmediateResize)
-				that.resize();
+			if(that.options.immediateResize || that.options.inmediateResize) //inmediate is for legacy...
+				that.onResize();
 		}
 
 		function inner_mouseup(e)
@@ -2210,7 +2817,7 @@ function beautifyJSON( code, skip_css )
 			var doc = that.root.ownerDocument;
 			doc.removeEventListener("mousemove",inner_mousemove);
 			doc.removeEventListener("mouseup",inner_mouseup);
-			that.resize();
+			that.onResize();
 		}
 	}
 
@@ -2228,6 +2835,9 @@ function beautifyJSON( code, skip_css )
 	{
 		var section = this.sections[num];
 		var size = 0;
+
+		if( section && section.root.style.display != "none" )
+			return; //already visible
 		
 		if(this.direction == "horizontal")
 			size = section.root.style.width;
@@ -2289,47 +2899,62 @@ function beautifyJSON( code, skip_css )
 		var area2 = this.sections[1];
 		var splitinfo = " - "+ Area.splitbar_size +"px";
 
+		var min_size = this.options.minSplitSize || 10;
+
 		if(this.direction == "horizontal")
 		{
 
 			if (this.dynamic_section == area1)
 			{
-				var size = ($(area2.root).width() + delta) + "px";
-				area1.root.style.width = "-moz-calc( 100% - " + size + splitinfo + " )";
-				area1.root.style.width = "-webkit-calc( 100% - " + size + splitinfo + " )";
-				area1.root.style.width = "calc( 100% - " + size + splitinfo + " )";
-				area2.root.style.width = size;
+				//var size = ($(area2.root).width() + delta) + "px";
+				var size = (area2.root.offsetWidth + delta);
+				if(size < min_size)
+					size = min_size;
+				area1.root.style.width = "-moz-calc( 100% - " + size + "px " + splitinfo + " )";
+				area1.root.style.width = "-webkit-calc( 100% - " + size + "px " + splitinfo + " )";
+				area1.root.style.width = "calc( 100% - " + size + "px " + splitinfo + " )";
+				area2.root.style.width = size + "px"; //other split
 			}
 			else
 			{
-				var size = ($(area1.root).width() - delta) + "px";
-				area1.root.style.width = size;
-				area2.root.style.width = "-moz-calc( 100% - " + size + splitinfo + " )";
-				area2.root.style.width = "-webkit-calc( 100% - " + size + splitinfo + " )";
-				area2.root.style.width = "calc( 100% - " + size + splitinfo + " )";
+				//var size = ($(area1.root).width() - delta) + "px";
+				var size = (area1.root.offsetWidth - delta);
+				if(size < min_size)
+					size = min_size;
+				area2.root.style.width = "-moz-calc( 100% - " + size + "px " + splitinfo + " )";
+				area2.root.style.width = "-webkit-calc( 100% - " + size + "px " + splitinfo + " )";
+				area2.root.style.width = "calc( 100% - " + size + "px " + splitinfo + " )";
+				area1.root.style.width = size + "px"; //other split
 			}
 		}
 		else if(this.direction == "vertical")
 		{
 			if (this.dynamic_section == area1)
 			{
-				var size = ($(area2.root).height() - delta) + "px";
-				area1.root.style.height = "-moz-calc( 100% - " + size + splitinfo + " )";
-				area1.root.style.height = "-webkit-calc( 100% - " + size + splitinfo + " )";
-				area1.root.style.height = "calc( 100% - " + size + splitinfo + " )";
-				area2.root.style.height = size;
+				//var size = ($(area2.root).height() - delta) + "px";
+				var size = (area2.root.offsetHeight - delta);
+				if(size < min_size)
+					size = min_size;
+				area1.root.style.height = "-moz-calc( 100% - " + size + "px " + splitinfo + " )";
+				area1.root.style.height = "-webkit-calc( 100% - " + size + "px " + splitinfo + " )";
+				area1.root.style.height = "calc( 100% - " + size + "px " + splitinfo + " )";
+				area2.root.style.height = size + "px"; //other split
 			}
 			else
 			{
-				var size = ($(area1.root).height() + delta) + "px";
-				area1.root.style.height = size;
-				area2.root.style.height = "-moz-calc( 100% - " + size + splitinfo + " )";
-				area2.root.style.height = "-webkit-calc( 100% - " + size + splitinfo + " )";
-				area2.root.style.height = "calc( 100% - " + size + splitinfo + " )";
+				//var size = ($(area1.root).height() + delta) + "px";
+				var size = (area1.root.offsetHeight + delta);
+				if(size < min_size)
+					size = min_size;
+				area2.root.style.height = "-moz-calc( 100% - " + size + "px " + splitinfo + " )";
+				area2.root.style.height = "-webkit-calc( 100% - " + size + "px " + splitinfo + " )";
+				area2.root.style.height = "calc( 100% - " + size + "px " + splitinfo + " )";
+				area1.root.style.height = size + "px"; //other split
 			}
 		}
 
 		LiteGUI.trigger( this.root, "split_moved");
+		//trigger split_moved event in all areas inside this area
 		var areas = this.root.querySelectorAll(".litearea");
 		for(var i = 0; i < areas.length; ++i)
 			LiteGUI.trigger( areas[i], "split_moved" );
@@ -2375,7 +3000,7 @@ function beautifyJSON( code, skip_css )
 
 		this.sections = [];
 		this._computed_size = null;
-		this.resize();
+		this.onResize();
 	}
 
 	Area.prototype.add = function(v)
@@ -2471,8 +3096,10 @@ function beautifyJSON( code, skip_css )
 (function(){
 
 	/************** MENUBAR ************************/
-	function Menubar(id)
+	function Menubar(id, options)
 	{
+		options = options || {};
+
 		this.menu = [];
 		this.panels = [];
 
@@ -2484,25 +3111,30 @@ function beautifyJSON( code, skip_css )
 		this.root.appendChild( this.content );
 
 		this.is_open = false;
+		this.auto_open = options.auto_open || false;
+		this.sort_entries = options.sort_entries || false;
 	}
 
 	Menubar.closing_time = 500;
 
 	Menubar.prototype.clear = function()
 	{
-		$(this.content).empty();
+		this.content.innerHTML = "";
 		this.menu = [];
 		this.panels = [];
 	}
 
 	Menubar.prototype.attachToPanel = function(panel)
 	{
-		$(panel.content).prepend(this.root);
+		panel.content.insertBefore( this.root, panel.content.firstChild );
 	}
 
-	Menubar.prototype.add = function(path, data)
+	Menubar.prototype.add = function( path, data )
 	{
 		data = data || {};
+
+		if( typeof(data) == "function" )
+			data = { callback: data };
 
 		var prev_length = this.menu.length;
 
@@ -2510,25 +3142,27 @@ function beautifyJSON( code, skip_css )
 		var current_token = 0;
 		var current_pos = 0;
 		var menu = this.menu;
+		var last_item = null;
 
-		while(menu)
+		while( menu )
 		{
 			if(current_token > 5)
 				throw("Error: Menubar too deep");
 			//token not found in this menu, create it
-			if(menu.length == current_pos)
+			if( menu.length == current_pos )
 			{
-				var v = { children: []};
+				var v = { parent: last_item, children: [] };
+				last_item = v;
 				if(current_token == tokens.length - 1)
 					v.data = data;
 
 				v.disable = function() { if( this.data ) this.data.disabled = true; }
 				v.enable = function() { if( this.data ) delete this.data.disabled; }
 
-				v.name = tokens[current_token];
-				menu.push(v);
+				v.name = tokens[ current_token ];
+				menu.push( v );
 				current_token++;
-				if(current_token == tokens.length)
+				if( current_token == tokens.length )
 					break;
 				v.children = [];
 				menu = v.children;
@@ -2537,11 +3171,12 @@ function beautifyJSON( code, skip_css )
 			}
 
 			//token found in this menu, get inside for next token
-			if(menu[current_pos] && tokens[current_token] == menu[current_pos].name)
+			if( menu[ current_pos ] && tokens[ current_token ] == menu[ current_pos ].name )
 			{
 				if(current_token < tokens.length - 1)
 				{
-					menu = menu[current_pos].children;
+					last_item = menu[ current_pos ];
+					menu = menu[ current_pos ].children;
 					current_pos = 0;
 					current_token++;
 					continue;
@@ -2559,47 +3194,65 @@ function beautifyJSON( code, skip_css )
 			this.updateMenu();
 	};
 
-	Menubar.prototype.separator = function(path, order)
+	Menubar.prototype.remove = function( path )
 	{
-		var menu = this.findMenu(path);
-		if(!menu) return;
-		menu.push( {separator: true, order: order || 10 } );
+		var menu = this.findMenu( path );
+		if(!menu)
+			return;
+		if(!menu.parent || !menu.parent.children)
+			return console.warn("menu without parent?");
+		
+		var index = menu.parent.children.indexOf( menu );
+		if(index != -1)
+			menu.parent.children.splice( index, 1 );
+	},
+
+	Menubar.prototype.separator = function( path, order )
+	{
+		var menu = this.findMenu( path );
+		if(!menu)
+			return;
+		menu.children.push( {separator: true, order: order || 10 } );
 	}
 
-
-	Menubar.prototype.findMenu = function(path)
+	//returns the menu entry that matches this path
+	Menubar.prototype.findMenu = function( path )
 	{
 		var tokens = path.split("/");
 		var current_token = 0;
 		var current_pos = 0;
 		var menu = this.menu;
 
-		while(menu)
+		while( menu )
 		{
+			//no more tokens, return last found menu
 			if(current_token == tokens.length)
 				return menu;
 
+			//this menu doesnt have more entries
 			if(menu.length <= current_pos)
 				return null;
 
-			if(tokens[current_token] == "*")
-				return menu[current_pos].children;
+			if(tokens[ current_token ] == "*")
+				return menu[ current_pos ].children;
 
 			//token found in this menu, get inside for next token
-			if(tokens[current_token] == menu[current_pos].name)
+			if( tokens[ current_token ] == menu[ current_pos ].name )
 			{
-				if(current_token < tokens.length)
+				if(current_token == tokens.length - 1) //last token
 				{
-					menu = menu[current_pos].children;
+					return menu[ current_pos ];
+				}
+				else
+				{
+					menu = menu[ current_pos ].children;
 					current_pos = 0;
 					current_token++;
 					continue;
 				}
-				else //last token
-				{
-					return menu[current_pos];
-				}
 			}
+
+			//check next entry in this menu
 			current_pos++;
 		}
 		return null;
@@ -2610,7 +3263,7 @@ function beautifyJSON( code, skip_css )
 	{
 		var that = this;
 
-		$(this.content).empty();
+		this.content.innerHTML = "";
 		for(var i in this.menu)
 		{
 			var element = document.createElement("li");
@@ -2620,7 +3273,7 @@ function beautifyJSON( code, skip_css )
 			this.menu[i].element = element;
 
 			/* ON CLICK TOP MAIN MENU ITEM */
-			$(element).bind("click", function(e) {
+			element.addEventListener("click", function(e) {
 				var item = this.data;
 
 				if(item.data && item.data.callback && typeof(item.data.callback) == "function")
@@ -2628,7 +3281,6 @@ function beautifyJSON( code, skip_css )
 
 				if(!that.is_open)
 				{
-					//$(document).bind("click",inner_outside);
 					that.is_open = true;
 					that.showMenu( item, e, this );
 				}
@@ -2639,19 +3291,20 @@ function beautifyJSON( code, skip_css )
 				}
 			});
 
-			$(element).bind("mouseover", function(e) {
+			element.addEventListener("mouseover", function(e) {
 				that.hidePanels();
-				if(that.is_open)
+				if(that.is_open || that.auto_open)
 					that.showMenu( this.data, e, this );
 			});
 		}
 	}
 
 	Menubar.prototype.hidePanels = function() {
-		if(!this.panels.length) return;
+		if(!this.panels.length)
+			return;
 
 		for(var i in this.panels)
-			$(this.panels[i]).remove();
+			LiteGUI.remove(this.panels[i]);
 		this.panels = [];
 	}
 
@@ -2661,9 +3314,12 @@ function beautifyJSON( code, skip_css )
 		if(!is_submenu)
 			this.hidePanels();
 
-		if(!menu.children || !menu.children.length) return;
+		if(!menu.children || !menu.children.length)
+			return;
+
 		var that = this;
-		if(that.closing_by_leave) clearInterval(that.closing_by_leave);
+		if(that.closing_by_leave)
+			clearInterval(that.closing_by_leave);
 
 		var element = document.createElement("div");
 		element.className = "litemenubar-panel";
@@ -2672,15 +3328,16 @@ function beautifyJSON( code, skip_css )
 		for(var i in menu.children)
 			sorted_entries.push(menu.children[i]);
 
-		sorted_entries.sort(function(a,b) {
-			var a_order = 10;
-			var b_order = 10;
-			if(a && a.data && a.data.order != null) a_order = a.data.order;
-			if(a && a.separator && a.order != null) a_order = a.order;
-			if(b && b.data && b.data.order != null) b_order = b.data.order;
-			if(b && b.separator && b.order != null) b_order = b.order;
-			return a_order - b_order;
-		});
+		if(this.sort_entries)
+			sorted_entries.sort(function(a,b) {
+				var a_order = 10;
+				var b_order = 10;
+				if(a && a.data && a.data.order != null) a_order = a.data.order;
+				if(a && a.separator && a.order != null) a_order = a.order;
+				if(b && b.data && b.data.order != null) b_order = b.data.order;
+				if(b && b.separator && b.order != null) b_order = b.order;
+				return a_order - b_order;
+			});
 
 		for(var i in sorted_entries)
 		{
@@ -2688,10 +3345,18 @@ function beautifyJSON( code, skip_css )
 			var menu_item = sorted_entries[i];
 
 			item.className = 'litemenu-entry ' + ( item.children ? " submenu" : "" );
+			var has_submenu = menu_item.children && menu_item.children.length;
+
+			if(has_submenu)
+				item.classList.add("has_submenu");
+
 			if(menu_item && menu_item.name)
-				item.innerHTML = "<span class='icon'></span><span class='name'>" + menu_item.name + (menu_item.children && menu_item.children.length ? "<span class='more'>+</span>":"") + "</span>";
+				item.innerHTML = "<span class='icon'></span><span class='name'>" + menu_item.name + (has_submenu ? "<span class='more'>+</span>":"") + "</span>";
 			else
-				item.innerHTML = "<span class='separator'></span>";
+			{
+				item.classList.add("separator");
+				//item.innerHTML = "<span class='separator'></span>";
+			}
 
 			item.data = menu_item;
 
@@ -2713,7 +3378,7 @@ function beautifyJSON( code, skip_css )
 			}
 
 			/* ON CLICK SUBMENU ITEM */
-			$(item).bind("click",function(){
+			item.addEventListener("click",function(){
 				var item = this.data;
 				if(item.data)
 				{
@@ -2727,9 +3392,9 @@ function beautifyJSON( code, skip_css )
 						{
 							item.data.instance[item.data.property] = !item.data.instance[item.data.property];
 							if(	item.data.instance[item.data.property] )
-								$(this).addClass("checked");
+								this.classList.add("checked");
 							else
-								$(this).removeClass("checked");
+								this.classList.remove("checked");
 						}
 						else if( item.data.hasOwnProperty("value") )
 						{
@@ -2742,9 +3407,9 @@ function beautifyJSON( code, skip_css )
 					{
 						item.data.checkbox = !item.data.checkbox;
 						if(	item.data.checkbox )
-							$(this).addClass("checked");
+							this.classList.add("checked");
 						else
-							$(this).removeClass("checked");
+							this.classList.remove("checked");
 					}
 
 					//execute a function
@@ -2763,31 +3428,50 @@ function beautifyJSON( code, skip_css )
 					that.hidePanels();
 				}
 			});
-			$(element).append(item);
+
+			item.addEventListener("mouseenter",function(e){
+				/*
+				if( that.auto_open && this.classList.contains("has_submenu") )
+					LiteGUI.trigger( this, "click" );
+				*/
+			});
+
+			element.appendChild( item );
 		}
 
-		$(element).bind("mouseleave",function(e){
-			//if( $(e.target).hasClass("litemenubar-panel") || $(e.target).parents().hasClass("litemenubar-panel") ) 	return;
-			
-			if(that.closing_by_leave) clearInterval(that.closing_by_leave);
+		element.addEventListener("mouseleave",function(e){
+		
+			if(that.closing_by_leave)
+				clearInterval(that.closing_by_leave);
+
 			that.closing_by_leave = setTimeout( function() { 
 				that.is_open = false;
 				that.hidePanels();
 			},LiteGUI.Menubar.closing_time);
 		});
 
-		$(element).bind("mouseenter",function(e){
-			if(that.closing_by_leave) clearInterval(that.closing_by_leave);
+		element.addEventListener("mouseenter",function(e){
+			if(that.closing_by_leave)
+				clearInterval(that.closing_by_leave);
 			that.closing_by_leave = null;
 		});
 
-		var jQ = $(root); //$(menu.element);
-		element.style.left = jQ.offset().left + ( is_submenu ? 200 : 0 ) + "px";
-		element.style.top = jQ.offset().top + jQ.height() + ( is_submenu ? -20 : 2 ) + "px";
+		//compute X and Y for menu
+		var box = root.getBoundingClientRect();
+		element.style.left = box.left + ( is_submenu ? 200 : 0 ) + "px";
+		element.style.top = box.top + box.height + ( is_submenu ? -20 : 10 ) + "px";
+		/* animation, not working well, flickers
+		element.style.opacity = "0.1";
+		element.style.transform = "translate(0,-10px)";
+		element.style.transition = "all 0.2s";
+		setTimeout( function(){ 
+			element.style.opacity = "1"; 
+			element.style.transform = "translate(0,0)";
+		},1);
+		*/
 
 		this.panels.push(element);
-		$(document.body).append(element);
-		$(element).hide().show();
+		document.body.appendChild( element );
 	}
 
 	LiteGUI.Menubar = Menubar;
@@ -2795,7 +3479,18 @@ function beautifyJSON( code, skip_css )
 /**************  ***************************/
 (function(){
 	
-	function Tabs(id,options)
+
+	/**
+	* Widget that contains several tabs and their content
+	* Options:
+	* - mode: "vertical","horizontal"
+	* - size
+	* - width,height
+	* - autoswitch: allow autoswitch (switch when mouse over)
+	* @class Tabs
+	* @constructor
+	*/
+	function Tabs( id, options )
 	{
 		options = options || {};
 		this.options = options;
@@ -2833,6 +3528,10 @@ function beautifyJSON( code, skip_css )
 			}
 		}
 
+		if(options.width)
+			this.root.style.width = options.width.constructor === Number ? options.width.toFixed(0) + "px" : options.width;
+		if(options.height)
+			this.root.style.height = options.height.constructor === Number ? options.height.toFixed(0) + "px" : options.height;
 
 		//container of tab elements
 		var list = document.createElement("UL");
@@ -2842,11 +3541,20 @@ function beautifyJSON( code, skip_css )
 		else
 			list.style.height = LiteGUI.Tabs.tabs_height + "px";
 
+		//allows to use the wheel to see hidden tabs
+		list.addEventListener("wheel", onMouseWheel);
+		list.addEventListener("mousewheel", onMouseWheel);
+		function onMouseWheel(e){
+			if(e.deltaY)
+				list.scrollLeft += e.deltaY;
+		}
+
 		this.list = list;
 		this.root.appendChild(this.list);
 		this.tabs_root = list;
 
 		this.tabs = {};
+		this.tabs_by_index = [];
 		this.selected = null;
 
 		this.onchange = options.callback;
@@ -2868,6 +3576,12 @@ function beautifyJSON( code, skip_css )
 		this.root.style.display = "none";
 	}
 
+
+	/**
+	* Returns the currently selected tab in the form of a tab object
+	* @method getCurrentTab
+	* @return {Object} the tab in the form of an object with {id,tab,content}
+	*/
 	Tabs.prototype.getCurrentTab = function()
 	{
 		if(!this.current_tab)
@@ -2880,7 +3594,11 @@ function beautifyJSON( code, skip_css )
 		return this.current_tab[0];
 	}
 
-	//used to know from which tab we come
+	/**
+	* Returns the last tab pressed before this one. used to know from which tab we come
+	* @method getCurrentTab
+	* @return {Object} the tab in the form of an object with {id,tab,content}
+	*/
 	Tabs.prototype.getPreviousTab = function()
 	{
 		if(!this.previous_tab)
@@ -2888,7 +3606,7 @@ function beautifyJSON( code, skip_css )
 		return this.tabs[ this.previous_tab[0] ];
 	}
 
-	Tabs.prototype.appendTo = function(parent,at_front)
+	Tabs.prototype.appendTo = function(parent, at_front)
 	{
 		if(at_front)
 			$(parent).prepend(this.root);
@@ -2896,11 +3614,47 @@ function beautifyJSON( code, skip_css )
 			$(parent).append(this.root);
 	}
 
+	/**
+	* Returns a tab given its id
+	* @method getTab
+	* @param {String} id tab id
+	* @return {Object} the tab in the form of an object with {id,tab,content}
+	*/
 	Tabs.prototype.getTab = function(id)
 	{
 		return this.tabs[id];
 	}
 
+	/**
+	* Returns a tab given its index in the tabs list
+	* @method getTabByIndex
+	* @param {Number} index
+	* @return {Object} the tab in the form of an object with {id,tab,content}
+	*/
+	Tabs.prototype.getTabByIndex = function(index)
+	{
+		return this.tabs_by_index[index];
+	}
+
+	/**
+	* Returns how many tabs there is
+	* @method getNumOfTabs
+	* @return {number} number of tabs
+	*/
+	Tabs.prototype.getNumOfTabs = function()
+	{
+		var num = 0;
+		for(var i in this.tabs)
+			num++;
+		return num;
+	}
+
+	/**
+	* Returns the content HTML element of a tab
+	* @method getTabContent
+	* @param {String} id
+	* @return {HTMLEntity} content
+	*/
 	Tabs.prototype.getTabContent = function(id)
 	{
 		var tab = this.tabs[id];
@@ -2908,6 +3662,12 @@ function beautifyJSON( code, skip_css )
 			return tab.content;
 	}
 
+	/**
+	* Returns the index of a tab (the position in the tabs list)
+	* @method getTabIndex
+	* @param {String} id
+	* @return {number} index
+	*/
 	Tabs.prototype.getTabIndex = function(id)
 	{
 		var tab = this.tabs[id];
@@ -2920,7 +3680,25 @@ function beautifyJSON( code, skip_css )
 	}
 
 
-	//create a new tab, where name is a unique identifier
+	/**
+	* Create a new tab, where id is a unique identifier
+	* @method addTab
+	* @param {String} id could be null then a random id is generated
+	* @param {Object} options { 
+	*	title: tab text, 
+	*	callback: called when selected, 
+	*	callback_leave: callback when leaving, 
+	*	content: HTML content, closable: if it can be closed (callback is onclose), 
+	*	tab_width: size of the tab,
+	*	tab_className: classes for the tab element,
+	*	id: content id,
+	*	size: full means all,
+	*	mode: "vertical" or "horizontal",
+	*	button: if it is a button tab, not a selectable tab
+	*	}
+	* @param {bool} skip_event prevent dispatching events
+	* @return {Object} an object containing { id, tab, content }
+	*/
 	Tabs.prototype.addTab = function( id, options, skip_event )
 	{
 		options = options || {};
@@ -2928,34 +3706,76 @@ function beautifyJSON( code, skip_css )
 			options = { callback: options };
 
 		var that = this;
+		if(id === undefined || id === null)
+			id = "rand_" + ((Math.random() * 1000000)|0);
 
 		//the tab element
 		var element = document.createElement("LI");
 		var safe_id = id.replace(/ /gi,"_");
-		element.className = "wtab wtab-" + safe_id;
+		element.className = "wtab wtab-" + safe_id + " ";
 		//if(options.selected) element.className += " selected";
 		element.dataset["id"] = id;
 		element.innerHTML = "<span class='tabtitle'>" + (options.title || id) + "</span>";
 
+		if(options.button)
+			element.className += "button ";
+		if(options.tab_className)
+			element.className += options.tab_className;
 		if(options.bigicon)
 			element.innerHTML = "<img class='tabbigicon' src='" + options.bigicon+"'/>" + element.innerHTML;
 		if(options.closable)
 		{
-			element.innerHTML += "<span class='tabclose'>X</span>";
+			element.innerHTML += "<span class='tabclose'>" + LiteGUI.special_codes.close + "</span>";
 			element.querySelector("span.tabclose").addEventListener("click", function(e) { 
 				that.removeTab(id);
 				e.preventDefault();
 				e.stopPropagation();
 			},true);
 		}
-		//WARNING: do not modify element.innerHTML or event will be lost
+		//WARNING: do not modify element.innerHTML or events will be lost
 
-		if(options.index && options.index != -1)
+		if( options.index !== undefined )
 		{
-			this.list.insertBefore(element, this.list.childNodes[options.index]);
+			var after = this.list.childNodes[options.index];
+			if(after)
+				this.list.insertBefore(element,after);
+			else
+				this.list.appendChild(element);
 		}
+		else if( this.plus_tab )
+			this.list.insertBefore( element, this.plus_tab );
 		else
 			this.list.appendChild(element);
+
+		if(options.tab_width)
+		{
+			element.style.width = options.tab_width.constructor === Number ? ( options.tab_width.toFixed(0) + "px" ) : options.tab_width;
+			element.style.minWidth = "0";
+		}
+
+		if(this.options.autoswitch)
+		{
+			element.classList.add("autoswitch");
+			element.addEventListener("dragenter",function(e){
+				//console.log("Enter",this.dataset["id"]);
+				if(that._timeout_mouseover)
+					clearTimeout(that._timeout_mouseover);
+				that._timeout_mouseover = setTimeout((function(){
+					LiteGUI.trigger(this,"click");
+					that._timeout_mouseover = null;
+				}).bind(this),1500);
+			});
+			
+			element.addEventListener("dragleave",function(e){
+				//console.log("Leave",this.dataset["id"]);
+				if(that._timeout_mouseover)
+				{
+					clearTimeout(that._timeout_mouseover);
+					that._timeout_mouseover = null;
+				}
+			});
+		}
+
 
 		//the content of the tab
 		var content = document.createElement("div");
@@ -2974,6 +3794,7 @@ function beautifyJSON( code, skip_css )
 				content.style.overflow = "auto";
 				if(options.size == "full")
 				{
+					content.style.width = "100%";
 					content.style.height = "calc( 100% - "+LiteGUI.Tabs.tabs_height+"px )"; //minus title
 					content.style.height = "-moz-calc( 100% - "+LiteGUI.Tabs.tabs_height+"px )"; //minus title
 					content.style.height = "-webkit-calc( 100% - "+LiteGUI.Tabs.tabs_height+"px )"; //minus title
@@ -2990,6 +3811,7 @@ function beautifyJSON( code, skip_css )
 				content.style.overflow = "auto";
 				if(options.size == "full")
 				{
+					content.style.height = "100%";
 					content.style.width = "calc( 100% - "+LiteGUI.Tabs.tabs_width+"px )"; //minus title
 					content.style.width = "-moz-calc( 100% - "+LiteGUI.Tabs.tabs_width+"px )"; //minus title
 					content.style.width = "-webkit-calc( 100% - "+LiteGUI.Tabs.tabs_width+"px )"; //minus title
@@ -3014,24 +3836,63 @@ function beautifyJSON( code, skip_css )
 			else
 				content.appendChild(options.content);
 		}
+
 		this.root.appendChild(content);
 
 		//when clicked
-		element.addEventListener("click", Tabs.prototype.onTabClicked );
+		if(!options.button)
+			element.addEventListener("click", Tabs.prototype.onTabClicked );
+		else
+			element.addEventListener("click", function(e){ 
+				var tab_id = this.dataset["id"];
+				if(options.callback)
+					options.callback( tab_id, e );
+			});
+
 		element.options = options;
 		element.tabs = this;
 
-		this.list.appendChild(element);
+		var title = element.querySelector("span.tabtitle");
 
-		var tab_info = {id: id, tab: element, content: content, add: function(v) { this.content.appendChild(v.root || v); }};
+		//tab object
+		var tab_info = {
+			id: id,
+			tab: element,
+			content: content,
+			title: title,
+			add: function(v) { this.content.appendChild(v.root || v); },
+			setTitle: function( title )	{ this.title.innerHTML = title; },
+			click: function(){ LiteGUI.trigger( this.tab, "click" ); },
+			destroy: function(){ that.removeTab(this.id) }
+		};
+
 		if(options.onclose)
 			tab_info.onclose = options.onclose;
-		this.tabs[id] = tab_info;
+		this.tabs[ id ] = tab_info;
+
+		this.recomputeTabsByIndex();
+
+		//context menu
+		element.addEventListener("contextmenu", (function(e) { 
+			if(e.button != 2) //right button
+				return false;
+			e.preventDefault(); 
+			if(options.callback_context)
+				options.callback_context.call(tab_info);
+			return false;
+		}).bind(this));
 
 		if ( options.selected == true || this.selected == null )
 			this.selectTab( id, options.skip_callbacks );
 
 		return tab_info;
+	}
+
+	Tabs.prototype.addPlusTab = function( callback )
+	{
+		if(this.plus_tab)
+			console.warn("There is already a plus tab created in this tab widget");
+		this.plus_tab = this.addTab( "plus_tab", { title: "+", tab_width: 20, button: true, callback: callback, skip_callbacks: true });
 	}
 
 	//this is tab
@@ -3054,6 +3915,13 @@ function beautifyJSON( code, skip_css )
 		if(options.callback_canopen && options.callback_canopen() == false)
 			return;
 
+		//launch leaving current tab event
+		if( that.current_tab && 
+			that.current_tab[0] != tab_id && 
+			that.current_tab[2] && 
+			that.current_tab[2].callback_leave)
+				that.current_tab[2].callback_leave( that.current_tab[0], that.current_tab[1], that.current_tab[2] );
+
 		var tab_id = this.dataset["id"];
 		var tab_content = null;
 
@@ -3064,7 +3932,7 @@ function beautifyJSON( code, skip_css )
 			if( i == tab_id )
 			{
 				tab_info.selected = true;
-				tab_info.content.style.display = null;
+				tab_info.content.style.display = "";
 				tab_content = tab_info.content;
 			}
 			else
@@ -3077,13 +3945,6 @@ function beautifyJSON( code, skip_css )
 		$(that.list).find("li.wtab").removeClass("selected");
 		this.classList.add("selected");
 
-		//launch leaving current tab event
-		if( that.current_tab && 
-			that.current_tab[0] != tab_id && 
-			that.current_tab[2] && 
-			that.current_tab[2].callback_leave)
-				that.current_tab[2].callback_leave( that.current_tab[0], that.current_tab[1], that.current_tab[2] );
-
 		//change tab
 		that.previous_tab = that.current_tab;
 		that.current_tab = [tab_id, tab_content, options];
@@ -3092,7 +3953,7 @@ function beautifyJSON( code, skip_css )
 		{
 			//launch callback
 			if(options.callback) 
-				options.callback(tab_id, tab_content);
+				options.callback(tab_id, tab_content,e);
 
 			$(that).trigger("wchange",[tab_id, tab_content]);
 			if(that.onchange)
@@ -3108,7 +3969,7 @@ function beautifyJSON( code, skip_css )
 		if(!id)
 			return;
 
-		if(typeof(id) != "string")
+		if( id.constructor != String )
 			id = id.id; //in case id is the object referencing the tab
 
 		var tabs = this.list.querySelectorAll("li.wtab");
@@ -3130,6 +3991,24 @@ function beautifyJSON( code, skip_css )
 		tab.content.style.display = v ? "none" : null;
 	}
 
+	Tabs.prototype.recomputeTabsByIndex = function()
+	{
+		this.tabs_by_index = [];
+
+		for(var i in this.tabs)
+		{
+			var tab = this.tabs[i];
+
+			//compute index
+			var index = 0;
+			var child = tab.tab;
+			while( (child = child.previousSibling) != null ) 
+				index++;
+
+			this.tabs_by_index[index] = tab;
+		}
+	}
+
 	Tabs.prototype.removeTab = function(id)
 	{
 		var tab = this.tabs[id];
@@ -3142,9 +4021,11 @@ function beautifyJSON( code, skip_css )
 		tab.tab.parentNode.removeChild( tab.tab );
 		tab.content.parentNode.removeChild( tab.content );
 		delete this.tabs[id];
+
+		this.recomputeTabsByIndex();
 	}
 
-	Tabs.prototype.removeAllTabs = function()
+	Tabs.prototype.removeAllTabs = function( keep_plus )
 	{
 		var tabs = [];
 		for(var i in this.tabs)
@@ -3153,12 +4034,20 @@ function beautifyJSON( code, skip_css )
 		for(var i in tabs)
 		{
 			var tab = tabs[i];
+			if(tab == this.plus_tab && keep_plus)
+				continue;
+
 			tab.tab.parentNode.removeChild( tab.tab );
 			tab.content.parentNode.removeChild( tab.content );
 			delete this.tabs[ tab.id ];
 		}
 
-		this.tabs = {};
+		this.recomputeTabsByIndex();
+	}
+
+	Tabs.prototype.clear = function()
+	{
+		this.removeAllTabs();
 	}
 
 	Tabs.prototype.hideTab = function(id)
@@ -3239,6 +4128,7 @@ function beautifyJSON( code, skip_css )
 		tab_window.document.body.appendChild(newtabs.root);
 		that.transferTab(id, newtabs);
 		newtabs.tabs[id].tab.classList.add("selected");
+		this.recomputeTabsByIndex();
 
 		if(on_complete)
 			on_complete();
@@ -3254,7 +4144,18 @@ function beautifyJSON( code, skip_css )
 	/***** DRAGGER **********/
 	function Dragger(value, options)
 	{
-		options = options || {};
+		if(value === null || value === undefined)
+			value = 0;
+		else if(value.constructor === String)
+			value = parseFloat(value);
+		else if(value.constructor !== Number)
+			value = 0;
+
+		this.value = value;
+		var that = this;
+		var precision = options.precision != undefined ? options.precision : 3; //num decimals
+
+		this.options = options = options || {};
 		var element = document.createElement("div");
 		element.className = "dragger " + (options.extraclass ? options.extraclass : "");
 		this.root = element;
@@ -3269,7 +4170,7 @@ function beautifyJSON( code, skip_css )
 
 		var input = document.createElement("input");
 		input.className = "text number " + (dragger_class ? dragger_class : "");
-		input.value = value + (options.units ? options.units : "");
+		input.value = value.toFixed( precision ) + (options.units ? options.units : "");
 		input.tabIndex = options.tab_index;
 		this.input = input;
 		element.input = input;
@@ -3280,11 +4181,7 @@ function beautifyJSON( code, skip_css )
 			input.tabIndex = options.tab_index;
 		wrap.appendChild(input);
 
-		this.setValue = function(v) { 
-			$(input).val(v).trigger("change");
-		}
-		
-		$(input).bind("keydown",function(e) {
+		input.addEventListener("keydown",function(e) {
 			if(e.keyCode == 38)
 				inner_inc(1,e);
 			else if(e.keyCode == 40)
@@ -3304,21 +4201,27 @@ function beautifyJSON( code, skip_css )
 		wrap.appendChild(dragger);
 		element.dragger = dragger;
 
-		$(dragger).bind("mousedown",inner_down);
+		dragger.addEventListener("mousedown",inner_down);
+		input.addEventListener("wheel",inner_wheel,false);
+		input.addEventListener("mousewheel",inner_wheel,false);
+
+		var doc_binded = null;
 
 		function inner_down(e)
 		{
-			$(document).unbind("mousemove", inner_move);
-			$(document).unbind("mouseup", inner_up);
+			doc_binded = input.ownerDocument;
+
+			doc_binded.removeEventListener("mousemove", inner_move);
+			doc_binded.removeEventListener("mouseup", inner_up);
 
 			if(!options.disabled)
 			{
-				$(document).bind("mousemove", inner_move);
-				$(document).bind("mouseup", inner_up);
+				doc_binded.addEventListener("mousemove", inner_move);
+				doc_binded.addEventListener("mouseup", inner_up);
 
 				dragger.data = [e.screenX, e.screenY];
 
-				$(element).trigger("start_dragging");
+				LiteGUI.trigger( element,"start_dragging");
 			}
 
 			e.stopPropagation();
@@ -3338,12 +4241,25 @@ function beautifyJSON( code, skip_css )
 			return false;
 		};
 
+		function inner_wheel(e)
+		{
+			//console.log("wheel!");
+			if(document.activeElement !== this)
+				return;
+			var delta = e.wheelDelta !== undefined ? e.wheelDelta : (e.deltaY ? -e.deltaY/3 : 0);
+			inner_inc( delta > 0 ? 1 : -1, e );
+			e.stopPropagation();
+			e.preventDefault();
+		}
+
 		function inner_up(e)
 		{
-			$(element).trigger("stop_dragging");
-			$(document).unbind("mousemove", inner_move);
-			$(document).unbind("mouseup", inner_up);
-			$(dragger).trigger("blur");
+			LiteGUI.trigger(element, "stop_dragging");
+			var doc = doc_binded || document;
+			doc_binded = null;
+			doc.removeEventListener("mousemove", inner_move);
+			doc.removeEventListener("mouseup", inner_up);
+			LiteGUI.trigger(dragger,"blur");
 			e.stopPropagation();
 			e.preventDefault();
 			return false;
@@ -3351,6 +4267,8 @@ function beautifyJSON( code, skip_css )
 
 		function inner_inc(v,e)
 		{
+			if(!options.linear)
+				v = v > 0 ? Math.pow(v,1.2) : Math.pow( Math.abs(v), 1.2) * -1;
 			var scale = (options.step ? options.step : 1.0);
 			if(e && e.shiftKey)
 				scale *= 10;
@@ -3362,15 +4280,31 @@ function beautifyJSON( code, skip_css )
 			if(options.min != null && value < options.min)
 				value = options.min;
 
-			if(options.precision)
-				input.value = value.toFixed(options.precision);
-			else
-				input.value = ((value * 1000)<<0) / 1000; //remove ugly decimals
+			input.value = value.toFixed( precision );
+			//input.value = ((value * 1000)<<0) / 1000; //remove ugly decimals
 			if(options.units)
 				input.value += options.units;
-			$(input).change();
+			LiteGUI.trigger(input,"change");
 		}
 	}
+
+	Dragger.prototype.setValue = function(v, skip_event) { 
+		v = parseFloat(v);
+		this.value = v;
+		if(this.options.precision)
+			v = v.toFixed(this.options.precision);
+		if(this.options.units)
+			v += this.options.units;
+		this.input.value = v;
+		if(!skip_event)
+			LiteGUI.trigger( this.input, "change" );
+	}
+
+	Dragger.prototype.getValue = function()
+	{
+		return this.value;
+	}
+
 	LiteGUI.Dragger = Dragger;
 
 })();
@@ -3379,13 +4313,28 @@ function beautifyJSON( code, skip_css )
 
 
 /**
-* To create interactive trees (useful for folders or hierarchies)
-* data should be in the next structure:
-* {
-*    id: unique_identifier,
-*    content: what to show in the HTML (if omited id will be shown)
-*	 children: []  array with another object with the same structure
-* }
+* To create interactive trees (useful for folders or hierarchies).<br>
+* Options are:<br>
+*	+ allow_multiselection: allow to select multiple elements using the shift key<br>
+*	+ allow_rename: double click to rename items in the tree<br>
+*	+ allow_drag: drag elements around<br>
+*	+ height<br>
+* Item data should be in the next format:<br>
+* {<br>
+*    id: unique_identifier,<br>
+*    content: what to show in the HTML (if omited id will be shown)<br>
+*	 children: []  array with another object with the same structure<br>
+*	 className: class<br>
+*    precontent: HTML inserted before the content<br>
+*	 visible: boolean, to hide it<br>
+*	 dataset: dataset for the element<br>
+*	 onDragData: callback in case the user drags this item somewhere else<br>
+* }<br>
+* To catch events use tree.root.addEventListener(...)<br>
+* item_selected : receive { item: node, data: node.data }<br>
+* item_dblclicked<br>
+* item_renamed<br>
+* item_moved<br>
 *
 * @class Tree
 * @constructor
@@ -3402,8 +4351,9 @@ function beautifyJSON( code, skip_css )
 		root.className = "litetree";
 		this.tree = data;
 		var that = this;
-		options = options || {allow_rename: false, drag: false, allow_multiselection: false};
+		options = options || {allow_rename: false, allow_drag: true, allow_multiselection: false};
 		this.options = options;
+		this.indent_offset = options.indent_offset || 0;
 
 		if(options.height)
 			this.root.style.height = typeof(options.height) == "string" ? options.height : Math.round(options.height) + "px";
@@ -3447,9 +4397,14 @@ function beautifyJSON( code, skip_css )
 	{
 		this.root.innerHTML = "";
 		var root_item = this.createAndInsert( data, this.options, null);
-		root_item.className += " root_item";
-		//this.root.appendChild(root_item);
-		this.root_item = root_item;
+		if(root_item)
+		{
+			root_item.className += " root_item";
+			//this.root.appendChild(root_item);
+			this.root_item = root_item;
+		}
+		else
+			this.root_item = null;
 	}
 
 	/**
@@ -3461,7 +4416,7 @@ function beautifyJSON( code, skip_css )
 	* @param {object} options
 	* @return {DIVElement}
 	*/
-	Tree.prototype.insertItem = function(data, parent_id, position, options)
+	Tree.prototype.insertItem = function( data, parent_id, position, options)
 	{
 		if(!parent_id)
 		{
@@ -3472,14 +4427,15 @@ function beautifyJSON( code, skip_css )
 
 		var element = this.createAndInsert( data, options, parent_id, position );
 
+		//update parent collapse button
 		if(parent_id)
-			this._updateListBox( this._findElement(parent_id) );
+			this._updateListBox( this._findElement(parent_id) ); //no options here, this is the parent
 
 
 		return element;
 	}
 
-	Tree.prototype.createAndInsert = function(data, options, parent_id, element_index )
+	Tree.prototype.createAndInsert = function( data, options, parent_id, element_index )
 	{
 		//find parent
 		var parent_element_index = -1;
@@ -3500,13 +4456,25 @@ function beautifyJSON( code, skip_css )
 
 		//create
 		var element = this.createTreeItem( data, options, child_level );
+		if(!element) //error creating element
+			return;
+
 		element.parent_id = parent_id;
+
+		//check
+		var existing_item = this.getItem( element.dataset["item_id"] );
+		if( existing_item )
+			console.warn("There another item with the same ID in this tree");
 
 		//insert
 		if(parent_element_index == -1)
 			this.root.appendChild( element );
 		else
 			this._insertInside( element, parent_element_index, element_index );
+
+		//compute visibility according to parents
+		if( parent && !this._isNodeChildrenVisible( parent_id ) )
+			element.classList.add("hidden");
 
 		//children
 		if(data.children)
@@ -3517,16 +4485,17 @@ function beautifyJSON( code, skip_css )
 			}
 		}
 
-		this._updateListBox( element );
+		//update collapse button
+		this._updateListBox( element, options );
 
-		if(options.selected)
+		if(options && options.selected)
 			this.markAsSelected( element, true );
 
 		return element;
 	}
 
 	//element to add, position of the parent node, position inside children, the depth level
-	Tree.prototype._insertInside = function(element, parent_index, offset_index, level )
+	Tree.prototype._insertInside = function( element, parent_index, offset_index, level )
 	{
 		var parent = this.root.childNodes[ parent_index ];
 		if(!parent)
@@ -3537,7 +4506,7 @@ function beautifyJSON( code, skip_css )
 
 		var indent = element.querySelector(".indentblock");
 		if(indent)
-			indent.style.paddingLeft = (child_level * Tree.INDENT ) + "px"; //inner padding
+			indent.style.paddingLeft = ((child_level + this.indent_offset) * Tree.INDENT ) + "px"; //inner padding
 		
 		element.dataset["level"] = child_level;
 
@@ -3567,8 +4536,28 @@ function beautifyJSON( code, skip_css )
 		this.root.appendChild( element );
 	}
 
+
+	Tree.prototype._isNodeChildrenVisible = function( id )
+	{
+		var node = this.getItem( id );
+		if(!node)
+			return false;
+		if( node.classList.contains("hidden") )
+			return false;
+
+		//check listbox
+		var listbox = node.querySelector(".listbox");
+		if(!listbox)
+			return true;
+		if(listbox.getValue() == "closed")
+			return false;
+		return true;
+	}
+
 	Tree.prototype._findElement = function( id )
 	{
+		if( !id || id.constructor !== String)
+			throw("findElement param must be string with item id");
 		for(var i = 0; i < this.root.childNodes.length; ++i)
 		{
 			var childNode = this.root.childNodes[i];
@@ -3649,8 +4638,14 @@ function beautifyJSON( code, skip_css )
 		return result;
 	}
 	
-	Tree.prototype.createTreeItem = function(data, options, level)
+	Tree.prototype.createTreeItem = function( data, options, level )
 	{
+		if(data === null || data === undefined)
+		{
+			console.error("Tree item cannot be null");
+			return;
+		}
+
 		options = options || this.options;
 
 		var root = document.createElement("li");
@@ -3665,11 +4660,18 @@ function beautifyJSON( code, skip_css )
 			root.dataset["item_id"] = data.id;
 		}
 
+		if(data.dataset)
+			for(var i in data.dataset)
+				root.dataset[i] = data.dataset[i];
+
 		data.DOM = root; //double link
 		root.data = data;
 
 		if(level !== undefined)
+		{
 			root.dataset["level"] = level;
+			root.classList.add("ltree-level-" + level);
+		}
 
 		var title_element = document.createElement("div");
 		title_element.className = "ltreeitemtitle";
@@ -3689,8 +4691,11 @@ function beautifyJSON( code, skip_css )
 			for(var i in data.dataset)
 				root.dataset[i] = data.dataset[i];
 
-		root.appendChild(title_element);
+		root.appendChild( title_element );
 		root.title_element = title_element;
+
+		if(data.visible === false)
+			root.style.display = "none";
 
 		//var row = root.querySelector(".ltreeitemtitle .incontent");
 		var row = root;
@@ -3723,19 +4728,18 @@ function beautifyJSON( code, skip_css )
 			if(title._editing) 
 				return;
 
-			if(e.shiftKey && that.options.allow_multiselection)
+			if(e.ctrlKey && that.options.allow_multiselection)
 			{
 				//check if selected
 				if( that.isNodeSelected( node ) )
 				{
-					node.title_element.classList.remove("selected");
+					node.classList.remove("selected");
 					LiteGUI.trigger(that.root, "item_remove_from_selection", { item: node, data: node.data} );
 					return;
 				}
 
 				//mark as selected
 				that.markAsSelected( node, true );
-
 				LiteGUI.trigger(that.root, "item_add_to_selection", { item: node, data: node.data} );
 				var r = false;
 				if(data.callback) 
@@ -3743,6 +4747,31 @@ function beautifyJSON( code, skip_css )
 
 				if(!r && that.onItemAddToSelection)
 					that.onItemAddToSelection(node.data, node);
+			}
+			if(e.shiftKey && that.options.allow_multiselection)
+			{
+				//select from current selection till here
+				//current
+				var last_item = that.getSelectedItem();
+				if(!last_item)
+					return;
+
+				if(last_item === node)
+					return;
+
+				var nodeList = Array.prototype.slice.call( last_item.parentNode.children );
+				var last_index = nodeList.indexOf( last_item );
+				var current_index = nodeList.indexOf( node );
+
+				var items = current_index > last_index ? nodeList.slice( last_index, current_index ) : nodeList.slice( current_index, last_index );
+				for( var i = 0; i < items.length; ++i )
+				{
+					var item = items[i];
+					//console.log(item);
+					//mark as selected
+					that.markAsSelected( item, true );
+					LiteGUI.trigger( that.root, "item_add_to_selection", { item: item, data: item.data } );
+				}
 			}
 			else
 			{
@@ -3803,16 +4832,30 @@ function beautifyJSON( code, skip_css )
 			e.stopPropagation();
 		}
 
-		//dragging tree
+		//dragging element on tree
 		var draggable_element = title_element;
-		draggable_element.draggable = true;
+		if(this.options.allow_drag)
+		{
+			draggable_element.draggable = true;
 
-		//starts dragging this element
-		draggable_element.addEventListener("dragstart", function(ev) {
-			//this.removeEventListener("dragover", on_drag_over ); //avoid being drag on top of himself
-			//ev.dataTransfer.setData("node-id", this.parentNode.id);
-			ev.dataTransfer.setData("item_id", this.parentNode.dataset["item_id"]);
-		});
+			//starts dragging this element
+			draggable_element.addEventListener("dragstart", function(ev) {
+				//this.removeEventListener("dragover", on_drag_over ); //avoid being drag on top of himself
+				//ev.dataTransfer.setData("node-id", this.parentNode.id);
+				ev.dataTransfer.setData("item_id", this.parentNode.dataset["item_id"]);
+				if(!data.onDragData)
+					return;
+
+				var drag_data =	data.onDragData();
+				if(drag_data)
+				{
+					for(var i in drag_data)
+						ev.dataTransfer.setData(i,drag_data[i]);
+				}
+			});
+		}
+
+		var count = 0;
 
 		//something being dragged entered
 		draggable_element.addEventListener("dragenter", function (ev)
@@ -3820,15 +4863,19 @@ function beautifyJSON( code, skip_css )
 			ev.preventDefault();
 			if(data.skipdrag)
 				return false;
-
-			title_element.classList.add("dragover");
+			
+			if(count == 0)
+				title_element.classList.add("dragover");
+			count++;
 		});
 
 		draggable_element.addEventListener("dragleave", function (ev)
 		{
 			ev.preventDefault();
 			//console.log(data.id);
-			title_element.classList.remove("dragover");
+			count--;
+			if(count == 0)
+				title_element.classList.remove("dragover");
 			//if(ev.srcElement == this) return;
 		});
 
@@ -3841,7 +4888,7 @@ function beautifyJSON( code, skip_css )
 
 		draggable_element.addEventListener("drop", function (ev)
 		{
-			$(title_element).removeClass("dragover");
+			title_element.classList.remove("dragover");
 			ev.preventDefault();
 			if(data.skipdrag)
 				return false;
@@ -3852,6 +4899,8 @@ function beautifyJSON( code, skip_css )
 			if(!item_id)
 			{
 				LiteGUI.trigger( that.root, "drop_on_item", { item: this, event: ev });
+				if( that.onDropItem )
+					that.onDropItem( ev, this.parentNode.data );
 				return;
 			}
 
@@ -3871,16 +4920,25 @@ function beautifyJSON( code, skip_css )
 				console.error("Error: " + err );
 			}
 			*/
+
+			if( that.onDropItem )
+				that.onDropItem( ev, this.parentNode.data );
 		});
 
 		return root;
 	}
 
+
+	/**
+	* remove from the tree the items that do not have a name that matches the string
+	* @method filterByName
+	* @param {string} name
+	*/
 	Tree.prototype.filterByName = function(name)
 	{
 		for(var i = 0; i < this.root.childNodes.length; ++i)
 		{
-			var childNode = this.root.childNodes[i];
+			var childNode = this.root.childNodes[i]; //ltreeitem
 			if( !childNode.classList || !childNode.classList.contains("ltreeitem") )
 				continue;
 
@@ -3892,46 +4950,63 @@ function beautifyJSON( code, skip_css )
 
 			if(!name || str.indexOf( name.toLowerCase() ) != -1)
 			{
-				childNode.style.display = null;
+				if( childNode.data && childNode.data.visible !== false )
+					childNode.classList.remove("filtered");
 				var indent = childNode.querySelector(".indentblock");
 				if(indent)
 				{
 					if(name)
 						indent.style.paddingLeft = 0;
 					else
-						indent.style.paddingLeft = paddingLeft = (parseInt(childNode.dataset["level"]) * Tree.INDENT) + "px";
+						indent.style.paddingLeft = paddingLeft = ( (parseInt(childNode.dataset["level"]) + this.indent_offset) * Tree.INDENT) + "px";
 				}
 			}
 			else
 			{
-				childNode.style.display = "none";
+				childNode.classList.add("filtered");
 			}
 		}
+	}	
 
-		/*
-		var all = this.root.querySelectorAll(".ltreeitemtitle .incontent");
-		for(var i = 0; i < all.length; i++)
+	/**
+	* remove from the tree the items that do not have a name that matches the string
+	* @method filterByName
+	* @param {string} name
+	*/
+	Tree.prototype.filterByRule = function( callback_to_filter, param )
+	{
+		if(!callback_to_filter)
+			throw("filterByRule requires a callback");
+		for(var i = 0; i < this.root.childNodes.length; ++i)
 		{
-			var element = all[i];
-			if(!element)
+			var childNode = this.root.childNodes[i]; //ltreeitem
+			if( !childNode.classList || !childNode.classList.contains("ltreeitem") )
 				continue;
 
-			var str = element.innerHTML;
-			var parent = element.parentNode;
+			var content = childNode.querySelector(".incontent");
+			if(!content)
+				continue;
 
-			if(!name || str.indexOf(name) != -1)
+			if( callback_to_filter( childNode.data, content, param ) )
 			{
-				parent.style.display = null;
-				parent.parentNode.style.paddingLeft = (parseInt(parent.parentNode.dataset["level"]) * Tree.INDENT) + "px";
+				if( childNode.data && childNode.data.visible !== false )
+					childNode.classList.remove("filtered");
+				var indent = childNode.querySelector(".indentblock");
+				if(indent)
+				{
+					if(name)
+						indent.style.paddingLeft = 0;
+					else
+						indent.style.paddingLeft = paddingLeft = ( (parseInt(childNode.dataset["level"]) + this.indent_offset) * LiteGUI.Tree.INDENT) + "px";
+				}
 			}
 			else
 			{
-				parent.style.display = "none";
-				parent.parentNode.style.paddingLeft = 0;
+				childNode.classList.add("filtered");
 			}
 		}
-		*/
 	}	
+
 
 	/**
 	* get the item with that id, returns the HTML element
@@ -3984,7 +5059,7 @@ function beautifyJSON( code, skip_css )
 		if(!item.listbox)
 			return;
 
-		listbox.setValue(true);
+		listbox.setValue(true); //this propagates changes
 	}
 
 	/**
@@ -4001,7 +5076,7 @@ function beautifyJSON( code, skip_css )
 		if(!item.listbox)
 			return;
 
-		listbox.setValue(false);
+		listbox.setValue(false);  //this propagates changes
 	}
 
 
@@ -4044,7 +5119,7 @@ function beautifyJSON( code, skip_css )
 			return false;
 		var r = rects[0];
 		var h = r.height;
-		var x = parseInt( item.dataset["level"] ) * Tree.INDENT + 50;
+		var x = ( parseInt( item.dataset["level"] ) + this.indent_offset) * Tree.INDENT + 50;
 
 		this.root.scrollTop = item.offsetTop - (h * 0.5)|0;
 		if( r.width * 0.75 < x )
@@ -4058,7 +5133,7 @@ function beautifyJSON( code, skip_css )
 	* @method setSelectedItem
 	* @param {string} id
 	*/
-	Tree.prototype.setSelectedItem = function( id, scroll )
+	Tree.prototype.setSelectedItem = function( id, scroll, send_event )
 	{
 		if(!id)
 		{
@@ -4078,6 +5153,9 @@ function beautifyJSON( code, skip_css )
 		this.markAsSelected(node);
 		if( scroll && !this._skip_scroll )
 			this.scrollToItem(node);
+
+		if(send_event)
+			LiteGUI.trigger( node, "click" );
 
 		return node;
 	}
@@ -4112,7 +5190,7 @@ function beautifyJSON( code, skip_css )
 		var node = this.getItem(id);
 		if(!node) //not found
 			return null;
-		node.title_element.classList.remove("selected");
+		node.classList.remove("selected");
 	}
 
 	/**
@@ -4122,7 +5200,7 @@ function beautifyJSON( code, skip_css )
 	*/
 	Tree.prototype.getSelectedItem = function()
 	{
-		return this.root.querySelector(".ltreeitemtitle.selected");
+		return this.root.querySelector(".ltreeitem.selected");
 	}
 
 	/**
@@ -4132,7 +5210,7 @@ function beautifyJSON( code, skip_css )
 	*/
 	Tree.prototype.getSelectedItems = function()
 	{
-		return this.root.querySelectorAll(".ltreeitemtitle.selected");
+		return this.root.querySelectorAll(".ltreeitem.selected");
 	}
 
 	/**
@@ -4152,12 +5230,14 @@ function beautifyJSON( code, skip_css )
 	/**
 	* returns the children of an item
 	* @method getChildren
-	* @param {string} id
+	* @param {string} id could be string or node directly
 	* @param {bool} [only_direct=false] to get only direct children
 	* @return {Array}
 	*/
 	Tree.prototype.getChildren = function(id, only_direct )
 	{
+		if( id && id.constructor !== String && id.dataset )
+			id = id.dataset["item_id"];
 		return this._findChildElements( id, only_direct );
 	}
 
@@ -4185,13 +5265,18 @@ function beautifyJSON( code, skip_css )
 	Tree.prototype.moveItem = function(id, parent_id )
 	{
 		if(id === parent_id)
-			return;
+			return false;
 
 		var node = this.getItem( id );
 		var parent = this.getItem( parent_id );
 		var parent_index = this._findElementIndex( parent );
 		var parent_level = parseInt( parent.dataset["level"] );
 		var old_parent = this.getParent( node );
+		if(!old_parent)
+		{
+			console.error("node parent not found by id, maybe id has changed");
+			return false;
+		}
 		var old_parent_level = parseInt( old_parent.dataset["level"] );
 		var level_offset = parent_level - old_parent_level;
 
@@ -4199,38 +5284,42 @@ function beautifyJSON( code, skip_css )
 			return false;
 
 		if(parent == old_parent)
-			return;
+			return false;
 
 		//replace parent info
 		node.parent_id = parent_id;
 
-		//get all children and subchildren
+		//get all children and subchildren and reinsert them in the new level
 		var children = this.getChildren( node );
-		children.unshift(node); //add the node at the beginning
-
-		//remove all children
-		for(var i = 0; i < children.length; i++)
-			children[i].parentNode.removeChild( children[i] );
-
-		//update levels
-		for(var i = 0; i < children.length; i++)
+		if(children)
 		{
-			var child = children[i];
-			var new_level = parseInt(child.dataset["level"]) + level_offset;
-			child.dataset["level"] = new_level;
-		}
+			children.unshift( node ); //add the node at the beginning
 
-		//reinsert
-		parent_index = this._findElementIndex( parent ); //update parent index
-		var last_index = this._findElementLastChildIndex( parent_index );
-		if(last_index == -1)
-			last_index = 0;
-		for(var i = 0; i < children.length; i++)
-		{
-			var child = children[i];
-			this._insertInside( child, parent_index, last_index + i - 1, parseInt( child.dataset["level"] ) );
+			//remove all children
+			for(var i = 0; i < children.length; i++)
+				children[i].parentNode.removeChild( children[i] );
+
+			//update levels
+			for(var i = 0; i < children.length; i++)
+			{
+				var child = children[i];
+				var new_level = parseInt(child.dataset["level"]) + level_offset;
+				child.dataset["level"] = new_level;
+			}
+
+			//reinsert
+			parent_index = this._findElementIndex( parent ); //update parent index
+			var last_index = this._findElementLastChildIndex( parent_index );
+			if(last_index == -1)
+				last_index = 0;
+			for(var i = 0; i < children.length; i++)
+			{
+				var child = children[i];
+				this._insertInside( child, parent_index, last_index + i - 1, parseInt( child.dataset["level"] ) );
+			}
 		}
 		
+		//update collapse button
 		this._updateListBox( parent );
 		if(old_parent)
 			this._updateListBox( old_parent );
@@ -4244,19 +5333,35 @@ function beautifyJSON( code, skip_css )
 	* @param {string} id
 	* @return {bool}
 	*/
-	Tree.prototype.removeItem = function(id_or_node)
+	Tree.prototype.removeItem = function( id_or_node, remove_children )
 	{
 		var node = id_or_node;
 		if(typeof(id_or_node) == "string")
-			node = this.getItem(id_or_node);
+			node = this.getItem( id_or_node );
 		if(!node)
 			return false;
 
-		var parent = this.getParent(node);
+		//get parent
+		var parent = this.getParent( node );
+
+		//get all descendants
+		var child_nodes = null;
+		if(remove_children)
+			child_nodes = this.getChildren( node );
+
+		//remove html element
 		this.root.removeChild( node );
 
+		//remove all children
+		if( child_nodes )
+		{
+			for( var i = 0; i < child_nodes.length; i++ )
+				this.root.removeChild( child_nodes[i] );
+		}
+
+		//update parent collapse button
 		if(parent)
-			this._updateListBox(parent);
+			this._updateListBox( parent );
 		return true;
 	}
 
@@ -4270,18 +5375,45 @@ function beautifyJSON( code, skip_css )
 	{
 		var node = this.getItem(id);
 		if(!node)
-			return;
+			return false;
 
 		node.data = data;
 		if(data.id)
-			node.id = data.id;
+			node.id = data.id; //this updateItemId ?
 		if(data.content)
 		{
 			//node.title_element.innerHTML = "<span class='precontent'></span><span class='incontent'>" +  + "</span><span class='postcontent'></span>";
 			var incontent = node.title_element.querySelector(".incontent");
 			incontent.innerHTML = data.content;
 		}
+
+		return true;
 	}
+
+	/**
+	* update a given item id and the link with its children
+	* @method updateItemId
+	* @param {string} old_id
+	* @param {string} new_id
+	*/
+	Tree.prototype.updateItemId = function(old_id, new_id)
+	{
+		var node = this.getItem(old_id);
+		if(!node)
+			return false;
+
+		var children = this.getChildren( old_id, true );
+		node.id = new_id;
+
+		for(var i = 0; i < children.length; ++i)
+		{
+			var child = children[i];
+			child.parent_id = new_id;
+		}
+
+		return true;
+	}
+
 
 	/**
 	* clears all the items
@@ -4316,13 +5448,13 @@ function beautifyJSON( code, skip_css )
 	Tree.prototype.unmarkAllAsSelected = function()
 	{
 		this.root.classList.remove("selected");
-		var selected_array = this.root.querySelectorAll(".ltreeitemtitle.selected");
+		var selected_array = this.root.querySelectorAll(".ltreeitem.selected");
 		if(selected_array)
 		{
 			for(var i = 0; i < selected_array.length; i++)
 				selected_array[i].classList.remove("selected");
 		}
-		var semiselected = this.root.querySelectorAll(".ltreeitemtitle.semiselected");
+		var semiselected = this.root.querySelectorAll(".ltreeitem.semiselected");
 		for(var i = 0; i < semiselected.length; i++)
 			semiselected[i].classList.remove("semiselected");
 	}
@@ -4345,19 +5477,28 @@ function beautifyJSON( code, skip_css )
 		if(!add_to_existing_selection)
 			this.unmarkAllAsSelected();
 
-		//mark as selected
-		node.title_element.classList.add("selected");
+		//mark as selected (it was node.title_element?)
+		node.classList.add("selected");
 
 		//go up and semiselect
+		var parent = this.getParent( node );
+		while(parent)
+		{
+			parent.classList.add("semiselected");
+			parent = this.getParent( parent );
+		}
+		/*
 		var parent = node.parentNode.parentNode; //two elements per level
 		while(parent && parent.classList.contains("ltreeitem"))
 		{
 			parent.title_element.classList.add("semiselected");
 			parent = parent.parentNode.parentNode;
 		}
+		*/
 	}
 
-	Tree.prototype._updateListBox = function( node )
+	//updates the widget to collapse
+	Tree.prototype._updateListBox = function( node, options )
 	{
 		if(!node)
 			return;
@@ -4367,12 +5508,18 @@ function beautifyJSON( code, skip_css )
 		if(!node.listbox)
 		{
 			var pre = node.title_element.querySelector(".collapsebox");
-			var box = LiteGUI.createLitebox(true, function(e) { that.onClickBox(e, node); });
+			var box = LiteGUI.createLitebox(true, function(e) { 
+				that.onClickBox(e, node);
+				LiteGUI.trigger( that.root, "item_collapse_change", { item: node, data: box.getValue() } );
+			});
 			box.stopPropagation = true;
 			box.setEmpty(true);
 			pre.appendChild(box);
 			node.listbox = box;
 		}
+
+		if(options && options.collapsed)
+			node.listbox.collapse();
 
 		var child_elements = this.getChildren( node.dataset["item_id"] );
 		if(!child_elements)
@@ -4387,10 +5534,24 @@ function beautifyJSON( code, skip_css )
 	Tree.prototype.onClickBox = function(e, node)
 	{
 		var children = this.getChildren( node );
-		var status = node.listbox.getValue();
 
+		if(!children)
+			return;
+
+		//update children visibility
 		for(var i = 0; i < children.length; ++i)
-			children[i].style.display = status == "open" ? null : "none";
+		{
+			var child = children[i];
+			
+			var child_parent = this.getParent( child );
+			var visible = true;
+			if( child_parent )
+				visible = this._isNodeChildrenVisible(child_parent);
+			if(visible)
+				child.classList.remove("hidden");
+			else
+				child.classList.add("hidden");
+		}
 	}
 
 	LiteGUI.Tree = Tree;
@@ -4401,7 +5562,6 @@ function beautifyJSON( code, skip_css )
 	/****************** PANEL **************/
 	function Panel(id, options)
 	{
-		options = options || {};
 		this._ctor(id,options);
 	}
 
@@ -4409,6 +5569,14 @@ function beautifyJSON( code, skip_css )
 
 	Panel.prototype._ctor = function(id, options)
 	{
+		if(!options && id && id.constructor !== String)
+		{
+			options = id;
+			id = null;
+		}
+
+		options = options || {};
+
 		this.content = options.content || "";
 
 		var root = this.root = document.createElement("div");
@@ -4432,7 +5600,8 @@ function beautifyJSON( code, skip_css )
 		this.footer = this.root.querySelector(".panel-footer");
 
 		//if(options.scroll == false)	this.content.style.overflow = "hidden";
-		if(options.scroll == true)	this.content.style.overflow = "auto";
+		if(options.scroll == true)
+			this.content.style.overflow = "auto";
 	}
 
 	Panel.prototype.add = function( litegui_item )
@@ -4440,13 +5609,16 @@ function beautifyJSON( code, skip_css )
 		this.content.appendChild( litegui_item.root );
 	}
 
+	LiteGUI.Panel = Panel;
+})();
+(function(){
 	/****************** DIALOG **********************/
 	/**
 	* Dialog
 	*
 	* @class Dialog
 	* @param {string} id
-	* @param {Object} options useful options are { title, width, height, closable, on_close, }
+	* @param {Object} options useful options are { title, width, height, closable, on_close, scroll }
 	* @constructor
 	*/
 	function Dialog(id, options)
@@ -4457,16 +5629,23 @@ function beautifyJSON( code, skip_css )
 	Dialog.MINIMIZED_WIDTH = 200;
 	Dialog.title_height = "20px";
 
-	Dialog.getDialog = function(id)
+	Dialog.getDialog = function( id )
 	{
-		var element = document.getElementById(id);		
+		var element = document.getElementById( id );		
 		if(!element)
 			return null;
 		return element.dialog;
 	}
 
-	Dialog.prototype._ctor = function(id, options)
+	Dialog.prototype._ctor = function( id, options )
 	{
+		if(!options && id && id.constructor !== String)
+		{
+			options = id;
+			id = null;
+		}
+
+		var that = this;
 		this.width = options.width;
 		this.height = options.height;
 		this.minWidth = options.minWidth || 150;
@@ -4486,13 +5665,16 @@ function beautifyJSON( code, skip_css )
 		{
 			code += "<div class='panel-header'>"+options.title+"</div><div class='buttons'>";
 			if(options.minimize){
-				code += "<button class='mini-button minimize-button'></button>";
-				code += "<button class='mini-button maximize-button' style='display:none'></button>";
+				code += "<button class='litebutton mini-button minimize-button'>-</button>";
+				code += "<button class='litebutton mini-button maximize-button' style='display:none'></button>";
 			}
 			if(options.hide)
-				code += "<button class='mini-button hide-button'></button>";
+				code += "<button class='litebutton mini-button hide-button'></button>";
+			if(options.detachable)
+				code += "<button class='litebutton mini-button detach-button'></button>";
 			
-			if(options.close || options.closable) code += "<button class='mini-button close-button'></button>";
+			if(options.close || options.closable)
+				code += "<button class='litebutton mini-button close-button'>"+ LiteGUI.special_codes.close +"</button>";
 			code += "</div>";
 		}
 
@@ -4503,6 +5685,12 @@ function beautifyJSON( code, skip_css )
 		this.root = panel;
 		this.content = panel.querySelector(".content");
 		this.footer = panel.querySelector(".panel-footer");
+
+		if(options.fullcontent)
+		{
+			this.content.style.width = "100%";		
+			this.content.style.height = options.title ? "calc( 100% - "+Dialog.title_height+" )" : "100%";
+		}
 
 		if(options.buttons)
 		{
@@ -4531,7 +5719,39 @@ function beautifyJSON( code, skip_css )
 		if(hide_button)
 			hide_button.addEventListener("click", this.hide.bind(this) );
 
-		this.makeDialog(options);
+		var detach_button = panel.querySelector(".detach-button");
+		if(detach_button)
+			detach_button.addEventListener("click", function() { that.detachWindow(); });
+
+		//size, draggable, resizable, etc
+		this.enableProperties(options);
+
+		this.root.addEventListener("DOMNodeInsertedIntoDocument", function(){ 
+			if( that.on_attached_to_DOM )
+				that.on_attached_to_DOM();
+			if( that.on_resize )
+				that.on_resize();
+		});
+		this.root.addEventListener("DOMNodeRemovedFromDocument", function(){ 
+			if( that.on_detached_from_DOM )
+				that.on_detached_from_DOM();
+		});
+
+
+		//attach
+		if(options.attach || options.parent)
+		{
+			var parent = null;
+			if(options.parent)
+				parent = typeof(options.parent) == "string" ? document.querySelector(options.parent) : options.parent;
+			if(!parent)
+				parent = LiteGUI.root;
+			parent.appendChild( this.root );
+			this.center();
+		}
+
+		//if(options.position) //not docked
+		//	this.setPosition( options.position[0], options.position[1] );
 	}
 
 	/**
@@ -4543,9 +5763,11 @@ function beautifyJSON( code, skip_css )
 		this.content.appendChild( litegui_item.root || litegui_item );
 	}
 
-	Dialog.prototype.makeDialog = function(options)
+	//takes the info from the parent to 
+	Dialog.prototype.enableProperties = function(options)
 	{
 		options = options || {};
+		var that = this;
 
 		var panel = this.root;
 		panel.style.position = "absolute";
@@ -4569,7 +5791,7 @@ function beautifyJSON( code, skip_css )
 					panel.style.height = this.height;
 			}
 
-			this.content.style.height = "calc( " + this.height + " - 24px )";
+			this.content.style.height = "calc( " + this.height + "px - 24px )";
 		}
 
 		panel.style.boxShadow = "0 0 3px black";
@@ -4577,28 +5799,21 @@ function beautifyJSON( code, skip_css )
 		if(options.draggable)
 		{
 			this.draggable = true;
-			LiteGUI.draggable( panel, panel.querySelector(".panel-header") );
+			LiteGUI.draggable( panel, panel.querySelector(".panel-header"), function(){
+				that.bringToFront();
+			},null, function(){
+				return !that.minimized;
+			});
 		}
 
 		if(options.resizable)
 			this.setResizable();
-
-		//$(panel).bind("click",function(){});
-
-		var parent = null;
-		if(options.parent)
-			parent = typeof(options.parent) == "string" ? document.querySelector(options.parent) : options.parent;
-
-		if(!parent)
-			parent = LiteGUI.root;
-
-		parent.appendChild( this.root );
-		this.center();
 	}
 
 	Dialog.prototype.setResizable = function()
 	{
-		if(this.resizable) return;
+		if(this.resizable)
+			return;
 
 		var root = this.root;
 		this.resizable = true;
@@ -4606,40 +5821,63 @@ function beautifyJSON( code, skip_css )
 		footer.style.minHeight = "4px";
 		footer.classList.add("resizable");
 
+		var corner = document.createElement("div");
+		corner.className = "resizable-corner";
+		this.root.appendChild( corner );
+
 		footer.addEventListener("mousedown", inner_mouse);
+		corner.addEventListener("mousedown", inner_mouse, true);
 
 		var mouse = [0,0];
 		var that = this;
 
+		var is_corner = false;
+
 		function inner_mouse(e)
 		{
+			//console.log( getTime(), is_corner );
+
 			if(e.type == "mousedown")
 			{
 				document.body.addEventListener("mousemove", inner_mouse);
 				document.body.addEventListener("mouseup", inner_mouse);
+				is_corner = this == corner;
 				mouse[0] = e.pageX;
 				mouse[1] = e.pageY;
 			}
 			else if(e.type == "mousemove")
 			{
-				var h = $(root).height();
+				var rect = LiteGUI.getRect( root );
+				var w = rect.width;
+				var neww = w - (mouse[0] - e.pageX);
+	
+				var h = rect.height;
 				var newh = h - (mouse[1] - e.pageY);
-				$(root).height(newh + "px");
+
+				if(is_corner)
+					root.style.width = neww + "px";
+				root.style.height = newh + "px";
+
 				mouse[0] = e.pageX;
 				mouse[1] = e.pageY;
 				that.content.style.height = "calc( 100% - 24px )";
+
+				if(that.on_resize && (w != neww || h != newh) )
+					that.on_resize(e,neww,newh);
 			}
 			else if(e.type == "mouseup")
 			{
 				document.body.removeEventListener("mousemove", inner_mouse);
 				document.body.removeEventListener("mouseup", inner_mouse);
+				is_corner = false;
 			}
 			e.preventDefault();
+			e.stopPropagation();
 			return false;
 		}
 	}
 
-	Dialog.prototype.dockTo = function(parent, dock_type)
+	Dialog.prototype.dockTo = function( parent, dock_type )
 	{
 		if(!parent) return;
 		var panel = this.root;
@@ -4695,7 +5933,11 @@ function beautifyJSON( code, skip_css )
 		}
 
 		if(this.draggable)
-			$(panel).draggable({disabled: true});
+		{
+			//$(panel).draggable({disabled: true});
+			LiteGUI.draggable(panel);
+		}
+		
 
 		if(parent.content)
 			parent.content.appendChild(panel);
@@ -4711,11 +5953,17 @@ function beautifyJSON( code, skip_css )
 
 	Dialog.prototype.addButton = function(name,options)
 	{
+		options = options || {};
+		if( options.constructor === Function )
+			options = { callback: options };
+
 		var that = this;
 		var button = document.createElement("button");
+		button.className = "litebutton";
 
 		button.innerHTML = name;
-		if(options.className) button.className = options.className;
+		if(options.className)
+			button.className += " " + options.className;
 
 		this.root.querySelector(".panel-footer").appendChild( button );
 
@@ -4730,37 +5978,31 @@ function beautifyJSON( code, skip_css )
 		return button;
 	}
 
-	/*
-	Panel.prototype.open = function(v) {
-		$(this).trigger("opened");
-
-		if(!v)
-		{
-			$(this.root).remove();
-			return
-		}
-
-		$(this.root).hide('fade',null,function() {
-			$(this).remove();
-		});
-	}
-	*/	
-
 	/**
 	* destroys the dialog
 	* @method close
 	*/
 	Dialog.prototype.close = function() {
-		$(this.root).remove();
-		$(this).trigger("closed");
+		LiteGUI.remove( this.root );
+		LiteGUI.trigger( this, "closed", this);
 		if(this.on_close)
 			this.on_close();
+		if(this.onclose)
+			console.warn("Dialog: Do not use onclose, use on_close instead");
+		if(this.dialog_window)
+		{
+			this.dialog_window.close();
+			this.dialog_window = null;
+		}
 	}
 
 	Dialog.prototype.highlight = function(time)
 	{
 		time = time || 100;
 		this.root.style.outline = "1px solid white";
+		var doc = this.root.ownerDocument;
+		var w = doc.defaultView || doc.parentWindow;
+		w.focus();
 		setTimeout( (function(){
 			this.root.style.outline = null;
 		}).bind(this), time );
@@ -4769,10 +6011,11 @@ function beautifyJSON( code, skip_css )
 	Dialog.minimized = [];
 
 	Dialog.prototype.minimize = function() {
-		if(this.minimized) return;
+		if(this.minimized)
+			return;
 
 		this.minimized = true;
-		this.old_pos = $(this.root).position();
+		this.old_box = this.root.getBoundingClientRect();
 
 		this.root.querySelector(".content").style.display = "none";
 		
@@ -4782,11 +6025,11 @@ function beautifyJSON( code, skip_css )
 
 		var maximize_button = this.root.querySelector(".maximize-button");
 		if(maximize_button)
-			maximize_button.style.display = null;
+			maximize_button.style.display = "";
 
 		this.root.style.width = LiteGUI.Dialog.MINIMIZED_WIDTH + "px";
 
-		$(this).bind("closed", function() {
+		LiteGUI.bind( this, "closed", function() {
 			LiteGUI.Dialog.minimized.splice( LiteGUI.Dialog.minimized.indexOf( this ), 1);
 			LiteGUI.Dialog.arrangeMinimized();
 		});
@@ -4794,7 +6037,7 @@ function beautifyJSON( code, skip_css )
 		LiteGUI.Dialog.minimized.push( this );
 		LiteGUI.Dialog.arrangeMinimized();
 
-		$(this).trigger("minimizing");
+		LiteGUI.trigger( this,"minimizing" );
 	}
 
 	Dialog.arrangeMinimized = function()
@@ -4803,8 +6046,10 @@ function beautifyJSON( code, skip_css )
 		{
 			var dialog = LiteGUI.Dialog.minimized[i];
 			var parent = dialog.root.parentNode;
-			var pos = $(parent).height() - 20;
-			$(dialog.root).animate({ left: LiteGUI.Dialog.MINIMIZED_WIDTH * i, top: pos + "px" },100);
+			var pos = parent.getBoundingClientRect().height - 20;
+			//$(dialog.root).animate({ left: LiteGUI.Dialog.MINIMIZED_WIDTH * i, top: pos + "px" },100);
+			dialog.root.style.left = LiteGUI.Dialog.MINIMIZED_WIDTH * i;
+			dialog.root.style.top = pos + "px";
 		}
 	}
 
@@ -4813,13 +6058,16 @@ function beautifyJSON( code, skip_css )
 			return;
 		this.minimized = false;
 
-		this.root.querySelector(".content").style.display = null;
-		$(this.root).draggable({ disabled: false });
-		$(this.root).animate({ left: this.old_pos.left+"px" , top: this.old_pos.top + "px", width: this.width },100);
+		this.root.querySelector(".content").style.display = "";
+		LiteGUI.draggable(this.root);
+		this.root.style.left = this.old_box.left+"px";
+		this.root.style.top = this.old_box.top + "px";
+		this.root.style.width = this.old_box.width + "px";
+		this.root.style.height = this.old_box.height + "px";
 
 		var minimize_button = this.root.querySelector(".minimize-button");
 		if(minimize_button)
-			minimize_button.style.display = null;
+			minimize_button.style.display = "";
 
 		var maximize_button = this.root.querySelector(".maximize-button");
 		if(maximize_button)
@@ -4827,18 +6075,17 @@ function beautifyJSON( code, skip_css )
 
 		LiteGUI.Dialog.minimized.splice( LiteGUI.Dialog.minimized.indexOf( this ), 1);
 		LiteGUI.Dialog.arrangeMinimized();
-		$(this).trigger("maximizing");
+		LiteGUI.trigger( this, "maximizing" );
 	}
 
 	Dialog.prototype.makeModal = function()
 	{
 		LiteGUI.showModalBackground(true);
 		LiteGUI.modalbg_div.appendChild( this.root ); //add panel
-		//$(this.root).draggable({ disabled: true });
 		this.show();
 		this.center();
 
-		$(this).bind("closed", inner );
+		LiteGUI.bind( this, "closed", inner );
 
 		function inner(e)
 		{
@@ -4848,54 +6095,96 @@ function beautifyJSON( code, skip_css )
 
 	Dialog.prototype.bringToFront = function()
 	{
-		var parent = $(this.root).parent();
-		parent.detach(this.root);
-		parent.attach(this.root);
+		var parent = this.root.parentNode;
+		parent.removeChild(this.root);
+		parent.appendChild(this.root);
 	}
 
 	/**
 	* shows a hidden dialog
 	* @method show
 	*/
-	Dialog.prototype.show = function(v,callback)
+	Dialog.prototype.show = function( v, reference_element )
 	{
 		if(!this.root.parentNode)
-			LiteGUI.add(this);
+		{
+			if(!reference_element)
+				LiteGUI.add( this );
+			else
+			{
+				var doc = reference_element.ownerDocument;
+				var parent = doc.querySelector(".litegui-wrap") || doc.body;
+				parent.appendChild( this.root );
+				var w = doc.defaultView || doc.parentWindow;
+				w.focus();
+			}
+			this.center();
+		}
 
 		//$(this.root).show(v,null,100,callback);
-		this.root.style.display = null;
-		$(this).trigger("shown");
+		if(!this.detach_window)
+		{
+			this.root.style.display = "";
+			LiteGUI.trigger( this, "shown" );
+		}
 	}
 
 	/**
 	* hides the dialog
 	* @method hide
 	*/
-	Dialog.prototype.hide = function(v,callback)
+	Dialog.prototype.hide = function( v )
 	{
-		//$(this.root).hide(v,null,100,callback);
 		this.root.style.display = "none";
-		$(this).trigger("hidden");
+		LiteGUI.trigger(this, "hidden");
+	}
+
+	Dialog.prototype.fadeIn = function(time)
+	{
+		time = time || 1000;
+		this.root.style.display = "";
+		this.root.style.opacity = 0;
+		var that = this;
+		setTimeout(function(){
+			that.root.style.transition = "opacity "+time+"ms";
+			that.root.style.opacity = 1;
+		},100);
 	}
 
 	Dialog.prototype.setPosition = function(x,y)
 	{
+		if(!this.root.parentNode)
+			console.warn("LiteGUI.Dialog: Cannot set position of dialog if it is not in the DOM");
 		this.root.position = "absolute";
 		this.root.style.left = x + "px";
 		this.root.style.top = y + "px";
 	}
 
-	Dialog.prototype.setSize = function(w,h)
+	Dialog.prototype.setSize = function( w, h )
 	{
-		this.root.style.width = w + "px";
-		this.root.style.height = h + "px";
+		this.root.style.width = typeof(w) == "number" ? w + "px" : w;
+		this.root.style.height = typeof(h) == "number" ? h + "px" : h;
+	}
+
+	Dialog.prototype.setTitle = function(text)
+	{
+		if(!this.header)
+			return;
+		this.header.innerHTML = text;
 	}
 
 	Dialog.prototype.center = function()
 	{
+		if(!this.root.parentNode)
+			return;
+
 		this.root.position = "absolute";
-		this.root.style.left = Math.floor(( $(this.root.parentNode).width() - $(this.root).width() ) * 0.5) + "px";
-		this.root.style.top = Math.floor(( $(this.root.parentNode).height() - $(this.root).height() ) * 0.5) + "px";
+		var width = this.root.offsetWidth;
+		var height = this.root.offsetHeight;
+		var parent_width = this.root.parentNode.offsetWidth;
+		var parent_height = this.root.parentNode.offsetHeight;
+		this.root.style.left = Math.floor(( parent_width - width ) * 0.5) + "px";
+		this.root.style.top = Math.floor(( parent_height - height ) * 0.5) + "px";
 	}
 
 	/**
@@ -4903,19 +6192,102 @@ function beautifyJSON( code, skip_css )
 	* @method adjustSize
 	* @param {number} margin
 	*/
-	Dialog.prototype.adjustSize = function( margin )
+	Dialog.prototype.adjustSize = function( margin, skip_timeout )
 	{
 		margin = margin || 0;
 		this.content.style.height = "auto";
-		var width = $(this.content).width();
-		var height = $(this.content).height() + 20 + margin;
-		this.setSize(width,height);
+
+		if(this.content.offsetHeight == 0 && !skip_timeout) //happens sometimes if the dialog is not yet visible
+		{
+			var that = this;
+			setTimeout( function(){ that.adjustSize( margin, true ); }, 1 );
+			return;
+		}
+
+		var extra = 0;
+		var footer = this.root.querySelector(".panel-footer");
+		if(footer)
+			extra += footer.offsetHeight;
+
+		var width = this.content.offsetWidth;
+		var height = this.content.offsetHeight + 20 + margin + extra;
+
+		this.setSize( width, height );
 	}
 
 	Dialog.prototype.clear = function()
 	{
 		this.content.innerHTML = "";
 	}
+
+	Dialog.prototype.detachWindow = function( on_complete, on_close )
+	{
+		if(this.dialog_window)
+			return;
+
+		//create window
+		var rect = this.root.getClientRects()[0];
+		var w = rect.width;
+		var h = rect.height;
+		var title = "Window";
+		var header = this.root.querySelector(".panel-header");
+		if(header)
+			title = header.textContent;
+
+		var dialog_window = window.open("","","width="+w+", height="+h+", location=no, status=no, menubar=no, titlebar=no, fullscreen=yes");
+		dialog_window.document.write( "<head><title>"+title+"</title>" );
+		this.dialog_window = dialog_window;
+
+		//transfer style
+		var styles = document.querySelectorAll("link[rel='stylesheet'],style");
+		for(var i = 0; i < styles.length; i++)
+			dialog_window.document.write( styles[i].outerHTML );
+		dialog_window.document.write( "</head><body></body>" );
+		dialog_window.document.close();
+
+		var that = this;
+
+		//closing event
+		dialog_window.onbeforeunload = function(){
+			var index = LiteGUI.windows.indexOf( dialog_window );
+			if(index != -1)
+				LiteGUI.windows.splice( index, 1 );
+			if(on_close)
+				on_close();
+		}
+
+		//move the content there
+		dialog_window.document.body.appendChild( this.content );
+		this.root.style.display = "none"; //hide
+		this._old_height = this.content.style.height;
+		this.content.style.height = "100%";
+
+		LiteGUI.windows.push( dialog_window );
+
+		if(on_complete)
+			on_complete();
+
+		return dialog_window;		
+	}
+
+	Dialog.prototype.reattachWindow = function( on_complete )
+	{
+		if(!this.dialog_window)
+			return;
+
+		this.root.appendChild( this.content );
+		this.root.style.display = ""; //show
+		this.content.style.height = this._old_height;
+		delete this._old_height;
+		this.dialog_window.close();
+		var index = LiteGUI.windows.indexOf( this.dialog_window );
+		if(index != -1)
+			LiteGUI.windows.splice( index, 1 );
+		this.dialog_window = null;
+	}
+
+
+	//*********************************************
 
 	Dialog.showAll = function()
 	{
@@ -4947,41 +6319,261 @@ function beautifyJSON( code, skip_css )
 		}
 	}
 
-
-	LiteGUI.Panel = Panel;
 	LiteGUI.Dialog = Dialog;
 })();
-/* Attributes editor panel 
-	Dependencies: 
-		- jQuery
-		- jQuery UI (sliders)
-		- jscolor.js
-*/
+//enclose in a scope
+(function(){
 
-/* LiteWiget options:
-	+ name_width: the width of the widget name area
 
-*/
+function Table( options )
+{
+	options = options || {};
 
-jQuery.fn.wchange = function(callback) {
-	$(this[0]).on("wchange",callback);
-};
+	this.root = document.createElement("table");
+	this.root.classList.add("litetable");
 
-jQuery.fn.wclick = function(callback) {
-	$(this[0]).on("wclick",callback);
-};
+	this.columns = [];
+	this.column_fields = [];
+	this.rows = [];
+	this.data = [];
 
+	this._must_update_header = true;
+
+	if(options.colums)
+		this.setColumns(options.colums);
+
+	if(options.scrollable)
+		this.root.style.overflow = "auto";
+
+	if(options.height)
+		this.root.style.height = LiteGUI.sizeToCSS( options.height );
+
+	if(options.columns)
+		this.setColumns( options.columns );
+
+	if(options.rows)
+		this.setRows( options.data );
+}
+
+Table.prototype.setRows = function( data, reuse )
+{
+	this.data = data;
+	this.updateContent( reuse );
+}
+
+Table.prototype.addRow = function( row, skip_add )
+{
+	var tr = document.createElement("tr");
+
+	//create cells
+	for(var j = 0; j < this.column_fields.length; ++j)
+	{
+		var td = document.createElement("td");
+
+		var value = null;
+
+		if(row.constructor === Array )
+			value = row[ j ];
+		else //object
+			value = row[ this.column_fields[j] ];
+		if(value === undefined)
+			value = "";
+
+		td.innerHTML = value;
+
+		var column = this.columns[j];
+		if(column === undefined)
+			break;
+
+		if(column.className)
+			td.className = column.className;
+		if(column.width)
+			td.style.width = column.width;
+		tr.appendChild( td );
+	}
+
+	this.root.appendChild( tr );
+	this.rows.push( tr );
+	if(!skip_add)
+		this.data.push( row );
+
+	return tr;
+}
+
+Table.prototype.updateRow = function( index, row )
+{
+	this.data[ index ] = row;
+
+	var tr = this.rows[index];
+	if(!tr)
+		return;
+
+	var cells = tr.querySelectorAll("td");
+	for(var j = 0; j < cells.length; ++j)
+	{
+		var column = this.columns[j];
+
+		var value = null;
+
+		if(row.constructor === Array )
+			value = row[ j ];
+		else
+			value = row[ column.field ];
+
+		if(value === undefined)
+			value = "";
+
+		cells[j].innerHTML = value;
+	}
+	return tr;
+}
+
+Table.prototype.updateCell = function( row, cell, data )
+{
+	var tr = this.rows[ row ];
+	if(!tr)
+		return;
+	var cell = tr.childNodes[cell];
+	if(!cell)
+		return;
+	cell.innerHTML = data;
+	return cell;
+}
+
+
+Table.prototype.setColumns = function( columns )
+{
+	this.columns.length = 0;
+	this.column_fields.length = 0;
+
+	var avg_width = ((Math.floor(100 / columns.length)).toFixed(1)) + "%";
+
+	var rest = [];
+
+	for(var i = 0; i < columns.length; ++i)
+	{
+		var c = columns[i];
+
+		if( c === null || c === undefined )
+			continue;
+
+		//allow to pass just strings or numbers instead of objects
+		if( c.constructor === String || c.constructor === Number )
+			c = { name: String(c) };
+
+		var column = {
+			name: c.name || "",
+			width: LiteGUI.sizeToCSS(c.width || avg_width),
+			field: (c.field || c.name || "").toLowerCase(),
+			className: c.className
+		};
+
+		//last
+		if(i == columns.length - 1)
+			column.width = " calc( 100% - ( " + rest.join(" + ") + " ) )";
+		else
+			rest.push( column.width );
+
+		this.columns.push( column );
+		this.column_fields.push( column.field );
+	}
+
+	this._must_update_header = true;
+	this.updateContent();
+}
+
+Table.prototype.updateContent = function( reuse )
+{
+	this.root.innerHTML = "";
+
+	//update header
+	if(this._must_update_header)
+	{
+		this.header = document.createElement("tr");
+		for(var i = 0; i < this.columns.length; ++i)
+		{
+			var column = this.columns[i];
+			var th = document.createElement("th");
+			th.innerHTML = column.name;
+			if(column.width)
+				th.style.width = column.width;
+			column.th = th;
+			this.header.appendChild( th );
+		}
+		this._must_update_header = false;
+	}
+	this.root.appendChild( this.header );
+
+	if(!this.data)
+		return;
+
+	if(this.data.length != this.rows.length)
+		reuse = false;
+
+	if(reuse)
+	{
+		for(var i = 0; i < this.rows.length; ++i)
+		{
+			var data_row = this.data[i];
+			var tr = this.updateRow( i, data_row );
+			this.root.appendChild( tr );
+		}
+	}
+	else
+	{
+		this.rows.length = 0;
+
+		//create rows
+		for(var i = 0; i < this.data.length; ++i)
+		{
+			var row = this.data[i];
+			this.addRow( row, true );
+		}
+	}
+}
+
+
+
+LiteGUI.Table = Table;
+
+
+})();
 /**
-* Inspector allows to create a list of widgets easily
+* Inspector allows to create a list of widgets easily, it also provides methods to create the widgets automatically.<br/>
+* Every widget is created calling the function add followed by the widget name, p.e. addSlider or addVector3 or addNumber.<br/>
+* Widgets always receive three parameters:<br/>
+* - name: String that defines the name at that it will be shown in the left side of the widget.<br/>
+* - value: the value that will be displayed in the widget.<br/>
+* - options: Object containing all the values .<br/>
 *
 * @class Inspector
 * @param {string} id
-* @param {Object} options useful options are { width, widgets_width, name_width, full, widgets_per_row }
+* @param {Object} options object with a set of options { <br/>
+	width: total width <br/>
+	height: total height <br/>
+	widgets_width: width of every widget (used mostly in horizontal inspectors) <br/>
+	name_width: width of the name part of widgets <br/>
+	full: set to true if you want the inspector to use all the parent width and height <br/>
+	widgets_per_row: number of widgets per row, default is 1 but you can change it if you want to pack several widgets in a row (useful for small widgets like checkboxes) <br/>
+	one_line: widgets are place one next to the other horizontaly <br/>
+	onchange: callback to call when something changes <br/>
+   } <br/>
+
+	Dependencies: 
+		- jscolor.js
+
 * @constructor
 */
 
-function Inspector(id,options)
+function Inspector( id, options )
 {
+	//allows to pass only options instead of id
+	if(id && id.constructor === Object && !options)
+	{
+		options = id;
+		id = null;
+	}
+
 	options = options || {};
 	this.root = document.createElement("DIV");
 	this.root.className = "inspector " + ( options.full ? "full" : "");
@@ -4994,28 +6586,48 @@ function Inspector(id,options)
 	if(id)
 		this.root.id = id;
 
-	this.values = {};
 	this.sections = [];
-	this.widgets = {};
+	this.values = {};
+	this.widgets = [];
+	this.widgets_by_name = {};
+	this.row_number = 0; //used to detect if element is even (cannot use CSS, special cases everywhere)
 
-	this.addSection();
+	this.addContainer(); //add empty container
 	this.tab_index = Math.floor(Math.random() * 10000);
+
+	if(options.width)
+		this.root.style.width = LiteGUI.sizeToCSS( options.width );
+	if(options.height)
+	{
+		this.root.style.height = LiteGUI.sizeToCSS( options.height );
+		if(!options.one_line)
+			this.root.style.overflow = "auto";
+	}
 
 	if(options.name_width)
 		this.name_width = options.name_width;
 	if(options.widgets_width)
 		this.widgets_width = options.widgets_width;
 
-	if(options.parent) this.appendTo(options.parent);
+	if(options.noscroll)
+		this.root.style.overflow = "hidden";
+
+	if(options.onchange)
+		this.onchange = options.onchange;
+
+	if(options.parent)
+		this.appendTo(options.parent);
+
 	this.widgets_per_row = options.widgets_per_row || 1;
 }
 
-Inspector.prototype.appendTo = function(parent, at_front)
+//append the inspector to a parent
+Inspector.prototype.appendTo = function( parent, at_front)
 {
-	if(at_front)
-		$(parent).prepend(this.root);
+	if( at_front )
+		parent.insertBefore( this.root, parent.firstChild );
 	else
-		$(parent).append(this.root);
+		parent.appendChild( this.root );
 }
 
 /**
@@ -5024,19 +6636,25 @@ Inspector.prototype.appendTo = function(parent, at_front)
 */
 Inspector.prototype.clear = function()
 {
-	purgeElement(this.root, true); //hack, but doesnt seem to work
-	$(this.root).empty();
+	purgeElement( this.root, true ); //hack, but doesnt seem to work
 
-	this.sections = [];
+	while(this.root.hasChildNodes())
+		this.root.removeChild( this.root.lastChild );
+
+	this.row_number = 0;
 	this.values = {};
-	this.widgets = {};
-
-	this.addSection();
+	this.widgets = [];
+	this.widgets_by_name = {};
+	this.sections = [];
+	this.current_section = null;
+	this._current_container = null;
+	this._current_container_stack = null;
+	this.addContainer();
 }
 
 /**
 * Tryes to refresh (calls on_refresh)
-* @method clear
+* @method refresh
 */
 Inspector.prototype.refresh = function()
 {
@@ -5044,18 +6662,70 @@ Inspector.prototype.refresh = function()
 		this.on_refresh();
 }
 
-Inspector.prototype.append = function(widget, options)
+// Append widget to this inspector (TODO: rename to appendWidget)
+// + widget_parent
+// + replace
+Inspector.prototype.append = function( widget, options )
 {
-	var root = this.root;
-	if(this.current_group_content)
-		root = this.current_group_content;
-	else if(this.current_section_content)
-		root = this.current_section_content;
+	options = options || {};
 
-	if(options && options.replace)
-		options.replace.parentNode.replaceChild(widget, options.replace);
+	var root = options.widget_parent || this._current_container || this.root;
+
+	if(options.replace)
+		options.replace.parentNode.replaceChild( widget, options.replace );
 	else
-		root.appendChild(widget);
+	{
+		widget.section = this.current_section;
+		root.appendChild( widget );
+	}
+}
+
+Inspector.prototype.pushContainer = function( container )
+{
+	if( !this._current_container_stack )
+		this._current_container_stack = [ container ];
+	else
+	{
+		if( this._current_container_stack.indexOf( container ) != -1 )
+		{
+			console.warn("Container already in the stack");
+			return;
+		}
+
+		this._current_container_stack.push( container );
+	}
+
+	this._current_container = container;
+}
+
+Inspector.prototype.isContainerInStack = function( container )
+{
+	if(!this._current_container_stack)
+		return false;
+	if( this._current_container_stack.indexOf( container ) != -1 )
+		return true;
+	return false;
+}
+
+Inspector.prototype.popContainer = function( container )
+{
+	this.row_number = 0;
+	if(this._current_container_stack && this._current_container_stack.length)
+	{
+		if(container)
+		{
+			var aux = this._current_container_stack.pop();
+			while(aux && aux != container)
+				aux = this._current_container_stack.pop();
+		}
+		else
+		{
+			this._current_container_stack.pop();
+		}
+		this._current_container = this._current_container_stack[ this._current_container_stack.length - 1 ];
+	}
+	else
+		this._current_container = null;
 }
 
 Inspector.prototype.setup = function(info)
@@ -5063,83 +6733,111 @@ Inspector.prototype.setup = function(info)
 	for(var i in info)
 	{
 		var w = info[i];
-		var widget = this.add(w.type,w.name,w.value,w.options);
+		var widget = this.add( w.type, w.name, w.value, w.options );
 	}
+}
+
+/**  Returns the widget given the name
+*
+* @method getWidget
+* @param {String} name the name of the widget supplied when creating it or the number of the widget
+* @return {Object} widget object
+*/
+Inspector.prototype.getWidget = function( name )
+{
+	if( name !== null && name.constructor === Number )
+		return this.widgets[ name ];
+	return this.widgets_by_name[ name ];
 }
 
 /**  Given an instance it shows all the attributes
 *
 * @method inspectInstance
 * @param {Object} instance the instance that you want to inspect, attributes will be collected from this object
-* @param {Array} attrs an array with all the names of the properties you want to inspect, 
-*		  if not specified then it calls getAttributes, othewise collect them and tries to guess the type
-* @param {Object} attrs_info_example it overwrites the info about properties found in the object (in case the guessed type is wrong)
+* @param {Array} properties an array with all the names of the properties you want to inspect, 
+*		  if not specified then it calls getProperties, othewise collect them and tries to guess the type
+* @param {Object} properties_info_example it overwrites the info about properties found in the object (in case the automaticaly guessed type is wrong)
+* @param {Array} properties_to_skip this properties will be ignored
 */
-Inspector.prototype.inspectInstance = function(instance, attrs, attrs_info_example, attributes_to_skip ) 
+Inspector.prototype.inspectInstance = function( instance, properties, properties_info_example, properties_to_skip ) 
 {
 	if(!instance)
 		return;
 
-	if( !attrs && instance.getAttributes )
-		attrs = instance.getAttributes();
+	if( !properties )
+	{	if( instance.getProperties )
+			properties = instance.getProperties();
+		else
+			properties = this.collectProperties( instance );
+	}
 	else
-		attrs = this.collectAttributes(instance);
+	{
+	}
 
 	var classObject = instance.constructor;
-	if(!attrs_info_example && classObject.attributes)
-		attrs_info_example = classObject.attributes;
+	if(!properties_info_example && classObject.properties)
+		properties_info_example = classObject.properties;
 
-	//clone to ensure there is no overlap between widgets reusing the same container
-	var attrs_info = {};
+	//Properties info contains  name:type for every property
+	//Must be cloned to ensure there is no overlap between widgets reusing the same container
+	var properties_info = {};
 
-	//add to attrs_info the ones that are not specified 
-	for(var i in attrs)
+	if( instance.getInspectorProperties )
+		properties_info = instance.getInspectorProperties();
+	else
 	{
-		if(attrs_info_example && attrs_info_example[i])
+		//add to properties_info the ones that are not specified 
+		for(var i in properties)
 		{
-			//clone
-			attrs_info[i] = inner_clone( attrs_info_example[i] );
-			continue;
-		}
-
-		var v = attrs[i];
-
-		if(classObject["@" + i]) //in class object
-		{
-			var shared_options = classObject["@" + i];
-			attrs_info[i] = inner_clone( shared_options );
-			/*
-			for(var j in shared_options) //clone, because cannot be shared or errors could appear
-				options[j] = shared_options[j];
-				attrs_info[i] = options;
-			*/
-		}
-		else if(instance["@" + i])
-			attrs_info[i] = instance["@" + i];
-		else if (typeof(v) == "number")
-			attrs_info[i] = { type: "number", step: 0.1 };
-		else if (typeof(v) == "string")
-			attrs_info[i] = { type: "string" };
-		else if (typeof(v) == "boolean")
-			attrs_info[i] = { type: "boolean" };
-		else if( v && v.length )
-		{
-			switch(v.length)
+			if( properties_info_example && properties_info_example[i] )
 			{
-				case 2: attrs_info[i] = { type: "vec2", step: 0.1 }; break;
-				case 3: attrs_info[i] = { type: "vec3", step: 0.1 }; break;
-				case 4: attrs_info[i] = { type: "vec4", step: 0.1 }; break;
-				default: continue;
+				//clone
+				properties_info[i] = inner_clone( properties_info_example[i] );
+				continue;
+			}
+
+			var v = properties[i];
+
+			if(classObject["@" + i]) //guess from class object info
+			{
+				var shared_options = classObject["@" + i];
+				if( shared_options && shared_options.widget === null)
+					continue; //skip
+				properties_info[i] = inner_clone( shared_options );
+			}
+			else if(instance["@" + i]) //guess from instance info
+				properties_info[i] = instance["@" + i];
+			else if(v === null || v === undefined) //are you sure?
+				continue;
+			else 
+			{
+				switch( v.constructor )
+				{
+					case Number: properties_info[i] = { type: "number", step: 0.1 }; break;
+					case String: properties_info[i] = { type: "string" }; break;
+					case Boolean: properties_info[i] = { type: "boolean" }; break;
+					default:
+						if( v && v.length )
+						{
+							switch(v.length)
+							{
+								case 2: properties_info[i] = { type: "vec2", step: 0.1 }; break;
+								case 3: properties_info[i] = { type: "vec3", step: 0.1 }; break;
+								case 4: properties_info[i] = { type: "vec4", step: 0.1 }; break;
+								default: continue;
+							}
+						}
+				}
 			}
 		}
 	}
 
-	if(attributes_to_skip)
-		for(var i in attributes_to_skip)
-			delete attrs_info[ attributes_to_skip[i] ];
+	if(properties_to_skip)
+		for(var i in properties_to_skip)
+			delete properties_info[ properties_to_skip[i] ];
 
 	//showAttributes doesnt return anything but just in case...
-	return this.showAttributes( instance, attrs_info );
+	return this.showProperties( instance, properties_info );
 
 	//basic cloner
 	function inner_clone(original, target)
@@ -5153,11 +6851,13 @@ Inspector.prototype.inspectInstance = function(instance, attrs, attrs_info_examp
 
 /**  extract all attributes from an instance (enumerable properties that are not function and a name starting with alphabetic character)
 *
-* @method collectAttributes
+* @method collectPropertier
+* @param {Object} instance extract enumerable and public (name do not start with '_' ) properties from an object
+* return {Object} object with "name" : value for every property
 **/
-Inspector.prototype.collectAttributes = function(instance)
+Inspector.prototype.collectProperties = function( instance )
 {
-	var attrs = {};
+	var properties = {};
 
 	for(var i in instance)
 	{
@@ -5165,35 +6865,54 @@ Inspector.prototype.collectAttributes = function(instance)
 			continue;
 
 		var v = instance[i];
-		if ( v && v.constructor == Function )
+		if ( v && v.constructor == Function && !instance.constructor["@" + i])
 			continue;
-		attrs[i] = v;
+		properties[i] = v;
 	}
-	return attrs;
+	return properties;
 }
 
-//adds the widgets for the attributes specified in attrs_info of instance
-Inspector.prototype.showAttributes = function( instance, attrs_info ) 
+/** Adds the widgets for the properties specified in properties_info of instance, it will create callback and callback_update
+*
+* @method showProperties
+* @param {Object} instance the instance that you want to inspect
+* @param {Object} properties_info object containing   "property_name" :{ type: value, widget:..., min:..., max:... }  or just "property":"type"
+* @param {Array} properties_to_skip this properties will be ignored
+*/
+Inspector.prototype.showProperties = function( instance, properties_info ) 
 {
 	//for every enumerable property create widget
-	for(var i in attrs_info)
+	for(var i in properties_info)
 	{
-		var options = attrs_info[i];
-		if(!options.callback)
+		var varname = i;
+		var options = properties_info[i];
+		if(!options)
+			continue;
+		if(options.constructor === String) //it allows to just specify the type
+			options = { type: options };
+		if(options.name)
+			varname = options.name;
+		if(!options.callback) //generate default callback to modify data
 		{
-			var o = { instance: instance, name: i, options: options };
-			options.callback = Inspector.assignValue.bind(o);
+			var o = { instance: instance, name: varname, options: options };
+			options.callback = Inspector.assignValue.bind( o );
 
 		}
-		options.instance = instance;
+		if(!options.callback_update) //generate default refresh
+		{
+			var o = { instance: instance, name: varname };
+			options.callback_update = (function(){ return this.instance[ this.name ]; }).bind(o);
+		}
 
-		var type = options.type || options.widget || "string";
+		options.instance = instance;
+		options.varname = varname;
+
+		var type = options.widget || options.type || "string";
 
 		//used to hook stuff on special occasions
-		if( this.on_addAttribute )
-			this.on_addAttribute( type, instance, i, instance[i], options );
-
-		this.add( type, i, instance[i], options );
+		if( this.on_addProperty )
+			this.on_addProperty( type, instance, varname, instance[varname], options );
+		this.add( type, varname, instance[varname], options );
 	}
 
 	//extra widgets inserted by the object (stored in the constructor)
@@ -5204,18 +6923,21 @@ Inspector.prototype.showAttributes = function( instance, attrs_info )
 			this.add( w.widget, w.name, w.value, w );
 		}
 
-	//used to add extra widgets
-	if(instance.onShowAttributes)
-		instance.onShowAttributes(this);
-
-	if(instance.constructor.onShowAttributes)
-		instance.constructor.onShowAttributes(instance, this);
+	//used to add extra widgets at the end
+	if(instance.onShowProperties)
+		instance.onShowProperties(this);
+	if(instance.constructor.onShowProperties)
+		instance.constructor.onShowProperties(instance, this);
 }
 
+/**
+* Tryes to assigns a value to the instance stored in this.instance
+* @method assignValue
+*/
 Inspector.assignValue = function(value)
 {
 	var instance = this.instance;
-	var current_value = instance[this.name];
+	var current_value = instance[ this.name ];
 
 	if(current_value == null || value == null || this.options.type == "enum")
 		instance[this.name] = value;
@@ -5223,34 +6945,60 @@ Inspector.assignValue = function(value)
 		instance[this.name] = parseFloat(value);
 	else if(typeof(current_value) == "string")
 		instance[this.name] = value;
-	else if(value && value.length && current_value && current_value.length)
+	else if( value && value.length && current_value && current_value.length && 
+		( !Object.getOwnPropertyDescriptor( instance, this.name ) || !Object.getOwnPropertyDescriptor( instance, this.name ).set ) &&  //no setters
+		( !Object.getOwnPropertyDescriptor( instance.__proto__, this.name ) || !Object.getOwnPropertyDescriptor( instance.__proto__, this.name ).set ) ) 
 	{
 		for(var i = 0; i < value.length; ++i)
 			current_value[i] = value[i];
 	}
 	else
-		instance[this.name] = value;
+		instance[ this.name ] = value;
 }
 
+/**
+* Used by all widgets to create the container of one widget
+* @method createWidget
+* @param {string} name the string to show at the left side of the widget, if null this element wont be created and the value part will use the full width
+* @param {string} content the string with the html of the elements that conform the interactive part of the widget
+* @param {object} options some generic options that any widget could have:
+* - width: the width of the widget (if omited it will use the Inspector widgets_width, otherwise 100%
+* - name_width: the width of the name part of the widget, if not specified it will use Inspector name_width, otherwise css default
+* - content_width: the width of the widget content area
+* - pre_title: string to append to the left side of the name, this is helpful if you want to add icons with behaviour when clicked
+* - title: string to replace the name, sometimes you want to supply a different name than the one you want to show (this is helpful to retrieve values from an inspector)
+*/
 Inspector.prototype.createWidget = function(name, content, options) 
 {
 	options = options || {};
-	content = content || "";
+	content = (content === undefined || content === null) ? "" : content;
 	var element = document.createElement("DIV");
 	element.className = "widget " + (options.className || "");
 	element.inspector = this;
 	element.options = options;
 	element.name = name;
+	
+	this.row_number += this.widgets_per_row;
+	if(this.row_number % 2 == 0)
+		element.className += " even";
 
 	var width = options.width || this.widgets_width;
-	if(width)
+	if( width )
 	{
-		element.style.width = typeof(width) == "string" ? width : width + "px";
-		element.style.minWidth = element.style.width;
+		element.style.width = LiteGUI.sizeToCSS( width );
+		element.style.minWidth = "auto";
+	}
+	var height = options.height || this.height;
+	if( height )
+	{
+		element.style.height = LiteGUI.sizeToCSS( height );
+		element.style.minHeight = "auto";
 	}
 
+	//store widgets 
+	this.widgets.push( element );
 	if(name)
-		this.widgets[name] = element;
+		this.widgets_by_name[name] = element;
 
 	if(this.widgets_per_row != 1)
 	{
@@ -5261,17 +7009,21 @@ Inspector.prototype.createWidget = function(name, content, options)
 
 	var namewidth = "";
 	var contentwidth = "";
-	if(name != null && (this.name_width || options.name_width) && !this.one_line)
+	if( (name !== undefined && name !== null) && (this.name_width || options.name_width) && !this.one_line)
 	{
-		var w = options.name_width || this.name_width;
-		if(typeof(w) == "number") w = w.toFixed() + "px";
+		var w = LiteGUI.sizeToCSS( options.name_width || this.name_width );
 		namewidth = "style='width: calc(" + w + " - 0px); width: -webkit-calc(" + w + " - 0px); width: -moz-calc(" + w + " - 0px); '"; //hack 
 		contentwidth = "style='width: calc( 100% - " + w + "); width: -webkit-calc(100% - " + w + "); width: -moz-calc( 100% - " + w + "); '";
 	}
 
+	if(options.name_width)
+		namewidth = "style='width: "+ LiteGUI.sizeToCSS(options.name_width)+" '";
+	if(options.content_width)
+		contentwidth = "style='width: "+ LiteGUI.sizeToCSS(options.content_width)+" '";
+
 	var code = "";
 	var pretitle = "";
-	var filling = this.one_line ? "" : "<span class='filling'>....................</span>";
+	var filling = this.one_line ? "" : "<span class='filling'></span>";
 
 	if(options.pretitle)
 		pretitle = options.pretitle;
@@ -5280,49 +7032,77 @@ Inspector.prototype.createWidget = function(name, content, options)
 	var title = name;
 	if(options.title)
 		title = options.title;
-	if(name == null)
+	if( name === null || name === undefined )
 		content_class += " full";
-	else if(name == "")
+	else if(name === "") //three equals because 0 == "" 
 		code += "<span class='wname' title='"+title+"' "+namewidth+">"+ pretitle +"</span>";
 	else
 		code += "<span class='wname' title='"+title+"' "+namewidth+">"+ pretitle + name + filling + "</span>";
 
-	if(typeof(content) == "string")
+	if( content.constructor === String || content.constructor === Number || content.constructor === Boolean )
 		element.innerHTML = code + "<span class='info_content "+content_class+"' "+contentwidth+">"+content+"</span>";
 	else
 	{
 		element.innerHTML = code + "<span class='info_content "+content_class+"' "+contentwidth+"></span>";
-		$(element).find("span.info_content").append(content);
+		var content_element = element.querySelector("span.info_content");
+		if(content_element)
+			content_element.appendChild( content );
 	}
+
+	element.content = element.querySelector("span.info_content");
+	element.remove = function() { 
+		if( this.parentNode ) 
+			this.parentNode.removeChild( this );
+	};
 
 	return element;
 }
 
 //calls callback, triggers wchange, calls onchange in Inspector
-Inspector.onWidgetChange = function(element, name, value, options, expand_value )
+Inspector.onWidgetChange = function( element, name, value, options, expand_value, event )
 {
-	this.values[name] = value;
-	//LiteGUI.trigger( this.current_section, "wchange", value );
-	$(this.current_section).trigger("wchange",value); //used for undo //TODO: REMOVE
+	var section = element.section; //this.current_section
+
+	if(!options.skip_wchange)
+	{
+		if(section)
+			LiteGUI.trigger( section, "wbeforechange", value );
+		//$(this.current_section).trigger("wbeforechange",value); //used for undo //TODO: use LiteGUI.trigger
+		LiteGUI.trigger( element, "wbeforechange", value );
+		//$(element).trigger("wbeforechange",value); //TODO: REPLACE by LiteGUI.trigger
+	}
+
+	//assign and launch callbacks
+	this.values[ name ] = value;
 	var r = undefined;
 	if(options.callback)
 	{
 		if(expand_value)
 			r = options.callback.apply( element, value );
 		else
-			r = options.callback.call( element, value );
+			r = options.callback.call( element, value, event );
 	}
 
-	//LiteGUI.trigger( element, "wchange", value );
-	$(element).trigger("wchange",value); //TODO: REPLACE by LiteGUI.trigger
+	if(!options.skip_wchange)
+	{
+		if(section)
+			LiteGUI.trigger( section, "wchange", value, element );
+		//$(this.current_section).trigger("wchange",value); //used for undo //TODO: use LiteGUI.trigger
+		LiteGUI.trigger( element, "wchange", value, element );
+		//$(element).trigger("wchange",value); //TODO: REPLACE by LiteGUI.trigger
+	}
+
 	if(this.onchange) 
 		this.onchange(name, value, element);
 	return r;
 }
 
+//must be lowercase
 Inspector.widget_constructors = {
+	"null": 'addNull', //use for special cases
 	title: 'addTitle',
 	info: 'addInfo',
+	"default": 'addDefault', //it guesses
 	number: 'addNumber',
 	slider: 'addSlider',
 	string: 'addString',
@@ -5347,6 +7127,8 @@ Inspector.widget_constructors = {
 	list: 'addList',
 	tree: 'addTree',
 	datatree: 'addDataTree',
+	pad: 'addPad',
+	array: 'addArray',
 	separator: 'addSeparator'
 };
 
@@ -5358,9 +7140,26 @@ Inspector.registerWidget = function(name, callback)
 	Inspector.widget_constructors[name] = func_name;
 }
 
-Inspector.prototype.add = function(type,name,value,options)
+
+/**
+* Adds a widgete to the inspector, its a way to provide the widget type from a string
+* @method add
+* @param {string} type string specifying the name of the widget to use (check Inspector.widget_constructors for a complete list)
+* @param {string} name the string to show at the left side of the widget, if null this element wont be created and the value part will use the full width
+* @param {string} value the value to assign to the widget
+* @param {object} options: some generic options that any widget could have:
+* - type: overwrites the type
+* - callback: function to call when the user interacts with the widget and changes the value
+* [For a bigger list check createWidget and every widget in particular]
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
+Inspector.prototype.add = function( type, name, value, options )
 {
-	if(typeof(type) == "object" && arguments.length == 1)
+	if(!type)
+		throw("Inspector: no type specified");
+
+	//type could be an object with every parameter contained inside
+	if( arguments.length == 1 && typeof(type) == "object" )
 	{
 		options = type;
 		type = options.type;
@@ -5368,21 +7167,23 @@ Inspector.prototype.add = function(type,name,value,options)
 		value = options.value;
 	}
 
-	var func = Inspector.widget_constructors[type];
+	var func = LiteGUI.Inspector.widget_constructors[type.toLowerCase()];
 	if(!func){
 		console.warn("LiteGUI.Inspector do not have a widget called",type);
 		return;
 	}
 
-	if(typeof(func) == "string")
-		func = Inspector.prototype[func];
-	if(!func) return;
-	if(typeof(func) != "function") return;
+	if( func.constructor === String )
+		func = LiteGUI.Inspector.prototype[func];
+	if( !func )
+		return;
+	if( func.constructor !== Function )
+		return;
 
-	if(typeof(options) == 'function')
+	if( options && options.constructor === Function )
 		options = { callback: options };
 	
-	return func.call(this, name,value, options);
+	return func.call( this, name,value, options );
 }
 
 Inspector.prototype.getValue = function(name)
@@ -5390,143 +7191,28 @@ Inspector.prototype.getValue = function(name)
 	return this.values[name];
 }
 
-Inspector.prototype.set = function(name, value)
+
+Inspector.prototype.applyOptions = function( element, options )
 {
-	//TODO
-}
+	if(!element || !options)
+		return;
 
-Inspector.prototype.addSection = function(name, options)
-{
-	if(this.current_group)
-		this.endGroup();
-
-	options = this.processOptions(options);
-
-	var element = document.createElement("DIV");
-	element.className = "wsection";
-	if(!name) element.className += " notitle";
 	if(options.className)
 		element.className += " " + options.className;
-	if(options.collapsed)
-		element.className += " collapsed";
-
 	if(options.id)
 		element.id = options.id;
-	if(options.instance)
-		element.instance = options.instance;
-
-	var code = "";
-	if(name)
-		code += "<div class='wsectiontitle'>"+(options.no_collapse ? "" : "<span class='switch-section-button'></span>")+name+"</div>";
-	code += "<div class='wsectioncontent'></div>";
-	element.innerHTML = code;
-	this.root.appendChild(element);
-
-	if(name)
-		element.querySelector(".wsectiontitle").addEventListener("click",function(e) {
-			if(e.target.localName == "button") 
-				return;
-			element.classList.toggle("collapsed");
-			var seccont = element.querySelector(".wsectioncontent");
-			seccont.style.display = seccont.style.display === "none" ? null : "none";
-			if(options.callback)
-				options.callback.call( element, !element.classList.contains("collapsed") );
-		});
-
-	if(options.collapsed)
-		element.querySelector(".wsectioncontent").style.display = "none";
-
-	this.setCurrentSection( element );
-
-	if(options.widgets_per_row)
-		this.widgets_per_row = options.widgets_per_row;
-
-	element.refresh = function()
-	{
-		if(element.on_refresh)
-			element.on_refresh.call(this, element);
-	}
-
-	return element;
+	if(options.width)
+		element.style.width = LiteGUI.sizeToCSS( options.width );
+	if(options.height)
+		element.style.height = LiteGUI.sizeToCSS( options.height );
 }
 
-Inspector.prototype.setCurrentSection = function(element)
-{
-	if(this.current_group)
-		this.endGroup();
 
-	this.current_section = element;
-	this.current_section_content = element.querySelector(".wsectioncontent");
-	this.content = this.current_section_content; //shortcut
-}
-
-Inspector.prototype.getCurrentSection = function()
-{
-	return this.current_section;
-}
-
-Inspector.prototype.beginGroup = function(name, options)
-{
-	options = this.processOptions(options);
-
-	if(this.current_group)
-		this.endGroup();
-
-	var element = document.createElement("DIV");
-	element.className = "wgroup";
-	name = name || "";
-	element.innerHTML = "<div class='wgroupheader "+ (options.title ? "wtitle" : "") +"'><span class='wgrouptoggle'>-</span>"+name+"</div>";
-
-	var content = document.createElement("DIV");
-	content.className = "wgroupcontent";
-	if(options.collapsed)
-		content.style.display = "none";
-
-	element.appendChild(content);
-
-	var collapsed = options.collapsed || false;
-	element.querySelector(".wgroupheader").addEventListener("click", function() { 
-		var style = element.querySelector(".wgroupcontent").style;
-		style.display = style.display === "none" ? "" : "none";
-		collapsed = !collapsed;
-		element.querySelector(".wgrouptoggle").innerHTML = (collapsed ? "+" : "-");
-	});
-
-	this.append(element, options);
-
-	this.current_group = element;
-	this.current_group_content = content;
-	this.content = this.current_group_content; //shortcut
-
-	return element;
-}
-
-Inspector.prototype.endGroup = function(options)
-{
-	this.current_group = null;
-	this.current_group_content = null;
-	this.content = this.current_section_content; //shortcut
-}
-
-Inspector.prototype.addTitle = function(title,options)
-{
-	options = this.processOptions(options);
-
-	var element = document.createElement("DIV");
-	var code = "<span class='wtitle'><span class='text'>"+title+"</span>";
-	if(options.help)
-	{
-		code += "<span class='help'><div class='help-content'>"+options.help+"</div></span>";
-	}
-	code += "</span>";
-	element.innerHTML = code;
-
-	element.setValue = function(v) { $(this).find(".text").html(v); };
-
-	this.append(element, options);
-	return element;
-}
-
+/**
+* Creates a line
+* @method addSeparator
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
 Inspector.prototype.addSeparator = function()
 {
 	var element = document.createElement("DIV");
@@ -5535,6 +7221,47 @@ Inspector.prototype.addSeparator = function()
 	return element;
 }
 
+//used when you want to skip the widget of an object
+Inspector.prototype.addNull = function(name,value, options)
+{
+	return null;
+}
+
+//used when you dont know which widget to use
+Inspector.prototype.addDefault = function( name, value, options)
+{
+	if(value === null || value === undefined) //can we guess it from the current value?
+		return null;
+
+	if( value.constructor === Boolean )
+		return this.addCheckbox( name, value, options );
+	else if( value.constructor === String )
+		return this.addString( name, value, options );
+	else if( value.constructor === Number )
+		return this.addNumber( name, value, options );
+	else if( value.length == 4)
+		return this.addVector4( name, value, options );
+	else if( value.length == 3)
+		return this.addVector3( name, value, options );
+	else if( value.length == 2)
+		return this.addVector2( name, value, options );
+	return null;
+}
+
+
+/**
+* Widget to edit strings
+* @method addString
+* @param {string} name 
+* @param {string} value
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - focus: true if you want the cursor to be here
+* - password: true if you want to hide the string 
+* - immediate: calls the callback once every keystroke
+* - disabled: shows the widget disabled
+* - callback: function to call when the widget changes
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
 Inspector.prototype.addString = function(name,value, options)
 {
 	options = this.processOptions(options);
@@ -5551,63 +7278,204 @@ Inspector.prototype.addString = function(name,value, options)
 	var element = this.createWidget(name,"<span class='inputfield full "+(options.disabled?"disabled":"")+"'><input type='"+inputtype+"' tabIndex='"+this.tab_index+"' "+focus+" class='text string' value='"+value+"' "+(options.disabled?"disabled":"")+"/></span>", options);
 	var input = element.querySelector(".wcontent input");
 
+	if(options.placeHolder)
+		input.setAttribute("placeHolder",options.placeHolder);
+
+	if(options.align == "right")
+	{
+		input.style.direction = "rtl";
+		//input.style.textAlign = "right";
+	}
+
 	input.addEventListener( options.immediate ? "keyup" : "change", function(e) { 
 		var r = Inspector.onWidgetChange.call(that, element, name, e.target.value, options);
 		if(r !== undefined)
 			this.value = r;
 	});
 
+	if(options.callback_enter)
+		input.addEventListener( "keydown" , function(e) { 
+			if(e.keyCode == 13)
+			{
+				var r = Inspector.onWidgetChange.call(that, element, name, e.target.value, options);
+				options.callback_enter();
+				e.preventDefault();
+			}
+		});
+
 	this.tab_index += 1;
 
-	element.setValue = function(v) { 
+	element.setIcon = function(img)
+	{
+		if(!img)
+		{
+			input.style.background = "";
+			input.style.paddingLeft = "";
+		}
+		else
+		{
+			input.style.background = "transparent url('"+img+"') no-repeat left 4px center";
+			input.style.paddingLeft = "1.7em";
+		}
+	}
+	if(options.icon)
+		element.setIcon( options.icon );
+
+	element.setValue = function(v, skip_event) { 
+		if(v === undefined )
+			return;
+		if(v === input.value)
+			return;
 		input.value = v; 
-		LiteGUI.trigger(input, "change" );
+		if(!skip_event)
+			LiteGUI.trigger(input, "change" );
 	};
 	element.getValue = function() { return input.value; };
 	element.focus = function() { $(this).find("input").focus(); };
 	element.wchange = function(callback) { $(this).wchange(callback); }
 	this.append(element,options);
+	this.processElement(element, options);
 	return element;
 }
 
-Inspector.prototype.addStringButton = function(name,value, options)
+/**
+* Widget to edit strings, but it adds a button behind (useful to search values somewhere in case the user do not remember the name)
+* @method addStringButton
+* @param {string} name 
+* @param {string} value the string to show
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - disabled: shows the widget disabled
+* - button: string to show inside the button, default is "..."
+* - callback: function to call when the string is edited
+* - callback_button: function to call when the button is pressed
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
+Inspector.prototype.addStringButton = function( name, value, options)
 {
 	options = this.processOptions(options);
 
-	value = value || "";
+	if(value === undefined)
+		value = "";
 	var that = this;
 	this.values[name] = value;
 	
-	var element = this.createWidget(name,"<span class='inputfield button'><input type='text' tabIndex='"+this.tab_index+"' class='text string' value='"+value+"' "+(options.disabled?"disabled":"")+"/></span><button class='micro'>"+(options.button || "...")+"</button>", options);
+	var element = this.createWidget( name, "<span class='inputfield button'><input type='text' tabIndex='"+this.tab_index+"' class='text string' value='"+value+"' "+(options.disabled?"disabled":"")+"/></span><button class='micro'>"+(options.button || "...")+"</button>", options);
 	var input = element.querySelector(".wcontent input");
 	input.addEventListener("change", function(e) { 
 		var r = Inspector.onWidgetChange.call(that,element,name,e.target.value, options);
 		if(r !== undefined)
 			this.value = r;
 	});
-	
+
+	element.setIcon = function(img)
+	{
+		if(!img)
+		{
+			input.style.background = "";
+			input.style.paddingLeft = "";
+		}
+		else
+		{
+			input.style.background = "transparent url('"+img+"') no-repeat left 4px center";
+			input.style.paddingLeft = "1.7em";
+		}
+	}
+	if(options.icon)
+		element.setIcon( options.icon );
+
 	var button = element.querySelector(".wcontent button");
 	button.addEventListener("click", function(e) { 
 		if(options.callback_button)
-			options.callback_button.call(element, input.value );
+			options.callback_button.call( element, input.value, e );
 	});
+
+	if(options.button_width)
+	{
+		button.style.width = LiteGUI.sizeToCSS( options.button_width );
+		var inputfield = element.querySelector(".inputfield");
+		inputfield.style.width = "calc( 100% - " + button.style.width + " - 6px)";
+	}
+
 
 	this.tab_index += 1;
 	this.append(element,options);
 	element.wchange = function(callback) { $(this).wchange(callback); }
 	element.wclick = function(callback) { $(this).wclick(callback); }
-	element.setValue = function(v) { input.value = v; LiteGUI.trigger(input, "change" ); };
+	element.setValue = function(v, skip_event) { 
+		input.value = v;
+		if(!skip_event)
+			LiteGUI.trigger(input, "change" );
+	};
 	element.getValue = function() { return input.value; };
-	element.focus = function() { $(this).find("input").focus(); };
+	element.focus = function() { LiteGUI.focus(input); };
+	this.processElement(element, options);
 	return element;
 }
 
-Inspector.prototype.addNumber = function(name, value, options)
+/**
+* Widget to edit strings with multiline support
+* @method addTextarea
+* @param {string} name 
+* @param {string} value
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - focus: true if you want the cursor to be here
+* - password: true if you want to hide the string 
+* - immediate: calls the callback once every keystroke
+* - disabled: shows the widget disabled
+* - callback: function to call when the widget changes
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
+Inspector.prototype.addTextarea = function(name,value, options)
 {
 	options = this.processOptions(options);
 
-	if(!options.step)
-		options.step = 0.1;
+	value = value || "";
+	var that = this;
+	this.values[name] = value;
+
+	var element = this.createWidget(name,"<span class='inputfield textarea "+(options.disabled?"disabled":"")+"'><textarea tabIndex='"+this.tab_index+"' "+(options.disabled?"disabled":"")+">"+value+"</textarea></span>", options);
+	this.tab_index++;
+	var textarea = element.querySelector(".wcontent textarea");
+	textarea.addEventListener( options.immediate ? "keyup" : "change", function(e) { 
+		Inspector.onWidgetChange.call(that,element,name,e.target.value, options, false, e);
+	});
+	if(options.callback_keydown)
+		textarea.addEventListener( "keydown", options.callback_keydown );
+
+	if(options.height)
+		textarea.style.height = LiteGUI.sizeToCSS( options.height );
+	this.append(element,options);
+	element.setValue = function(v, skip_event) { 
+		if(v === undefined)
+			return;
+		if(v == textarea.value)
+			return;
+		textarea.value = v;
+		if(!skip_event)
+			LiteGUI.trigger( textarea,"change" );
+	};
+	this.processElement(element, options);
+	return element;
+}
+
+/**
+* Widget to edit numbers (it adds a dragging mini widget in the right side)
+* @method addNumber
+* @param {string} name 
+* @param {number} value 
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - disabled: shows the widget disabled
+* - callback: function to call when the string is edited
+* - precision: number of digits after the colon
+* - units: string to show after the number
+* - min: minimum value accepted
+* - max: maximum value accepted
+* - step: increments when draggin the mouse (default is 0.1)
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
+Inspector.prototype.addNumber = function(name, value, options)
+{
+	options = this.processOptions(options);
 
 	value = value || 0;
 	var that = this;
@@ -5620,12 +7488,20 @@ Inspector.prototype.addNumber = function(name, value, options)
 	options.tab_index = this.tab_index;
 	//options.dragger_class = "full";
 	options.full = true;
-	this.tab_index++;
+	options.precision = options.precision !== undefined ? options.precision : 2;
+	options.step = options.step === undefined ? (options.precision == 0 ? 1 : 0.1) : options.step;
 
-	var dragger = new LiteGUI.Dragger(value, options);
+	this.tab_index++;
+	
+	var dragger = null;
+	
+	dragger = new LiteGUI.Dragger(value, options);
 	dragger.root.style.width = "calc( 100% - 1px )";
 	element.querySelector(".wcontent").appendChild( dragger.root );
-	$(dragger.root).bind("start_dragging", inner_before_change.bind(options) );
+	dragger.root.addEventListener("start_dragging", inner_before_change.bind(options) );
+
+	if( options.disabled )
+		dragger.input.setAttribute("disabled","disabled");
 
 	function inner_before_change(e)
 	{
@@ -5635,34 +7511,60 @@ Inspector.prototype.addNumber = function(name, value, options)
 
 	var input = element.querySelector("input");
 	
-	$(input).change( function(e) { 
+	input.addEventListener("change", function(e) { 
+
+		LiteGUI.trigger( element, "wbeforechange", e.target.value );
+
 		that.values[name] = e.target.value;
 		//Inspector.onWidgetChange.call(that,this,name,ret, options);
 
 		if(options.callback)
 		{
-			var ret = options.callback.call(element, parseFloat( e.target.value) ); 
+			var ret = options.callback.call( element, parseFloat( e.target.value) ); 
 			if( typeof(ret) == "number")
 				this.value = ret;
 		}
-		$(element).trigger("wchange",e.target.value);
-		if(that.onchange) that.onchange(name,e.target.value,element);
+		LiteGUI.trigger( element, "wchange", e.target.value );
+		if(that.onchange)
+			that.onchange(name,e.target.value,element);
 	});
 
-	element.setValue = function(v) { 
+	element.setValue = function( v, skip_event) { 
+		if(v === undefined)
+			return;
 		v = parseFloat(v);
 		if(options.precision)
 			v = v.toFixed( options.precision );
-		input.value = v + (options.units || "");
-		LiteGUI.trigger( input,"change" );
+		v += (options.units || "");
+		if(input.value == v)
+			return;
+		input.value = v;
+		if(!skip_event)
+			LiteGUI.trigger( input,"change" );
 	};
 
 	element.getValue = function() { return parseFloat( input.value ); };
-	element.focus = function() { $(input).focus(); };
-
+	element.focus = function() { LiteGUI.focus(input); };
+	this.processElement(element, options);
 	return element;
 }
 
+/**
+* Widget to edit two numbers (it adds a dragging mini widget in the right side)
+* @method addVector2
+* @param {string} name 
+* @param {vec2} value 
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - callback: function to call once the value changes
+* - disabled: shows the widget disabled
+* - callback: function to call when the string is edited
+* - precision: number of digits after the colon
+* - units: string to show after the number
+* - min: minimum value accepted
+* - max: maximum value accepted
+* - step: increments when draggin the mouse (default is 0.1)
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
 Inspector.prototype.addVector2 = function(name,value, options)
 {
 	options = this.processOptions(options);
@@ -5695,50 +7597,75 @@ Inspector.prototype.addVector2 = function(name,value, options)
 	dragger2.root.style.width = "calc( 50% - 1px )";
 	wcontent.appendChild( dragger2.root );
 
-	$(dragger1.root).bind("start_dragging",inner_before_change.bind(options) );
-	$(dragger2.root).bind("start_dragging",inner_before_change.bind(options) );
+	LiteGUI.bind( dragger1.root ,"start_dragging", inner_before_change.bind(options) );
+	LiteGUI.bind( dragger2.root, "start_dragging", inner_before_change.bind(options) );
 
 	function inner_before_change(e)
 	{
 		if(this.callback_before) this.callback_before(e);
 	}
 
-	//ALL INPUTS
-	$(element).find("input").change( function(e) { 
+	var inputs = element.querySelectorAll("input");
+	for(var i = 0; i < inputs.length; ++i)
+		inputs[i].addEventListener( "change" , function(e) { 
+
 		//gather all three parameters
 		var r = [];
-		var elems = $(element).find("input");
+		var elems = inputs;
 		for(var i = 0; i < elems.length; i++)
 			r.push( parseFloat( elems[i].value ) );
+
+		LiteGUI.trigger( element, "wbeforechange", [r] );
 
 		that.values[name] = r;
 
 		if(options.callback)
 		{
-			var new_val = options.callback.call(element,r); 
+			var new_val = options.callback.call( element, r ); 
 			
 			if(typeof(new_val) == "object" && new_val.length >= 2)
 			{
 				for(var i = 0; i < elems.length; i++)
-					$(elems[i]).val(new_val[i]);
+					elems[i].value = new_val[i];
 				r = new_val;
 			}
 		}
 
-		$(element).trigger("wchange",[r]);
-		if(that.onchange) that.onchange(name,r,element);
+		LiteGUI.trigger( element, "wchange", [r] );
+		if(that.onchange)
+			that.onchange(name,r,element);
 	});
 
 	this.append(element,options);
 
-	element.setValue = function(v) { 
-		dragger1.setValue(v[0]);
-		dragger2.setValue(v[1]);
+	element.setValue = function( v, skip_event) { 
+		if(!v)
+			return;
+		if(dragger1.getValue() != v[0])
+			dragger1.setValue(v[0],true);
+		if(dragger2.getValue() != v[1])
+			dragger2.setValue(v[1],skip_event); //last one triggers the event
 	}
-
+	this.processElement(element, options);
 	return element;
 }
 
+/**
+* Widget to edit two numbers (it adds a dragging mini widget in the right side)
+* @method addVector3
+* @param {string} name 
+* @param {vec3} value 
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - callback: function to call once the value changes
+* - disabled: shows the widget disabled
+* - callback: function to call when the string is edited
+* - precision: number of digits after the colon
+* - units: string to show after the number
+* - min: minimum value accepted
+* - max: maximum value accepted
+* - step: increments when draggin the mouse (default is 0.1)
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
 Inspector.prototype.addVector3 = function(name,value, options)
 {
 	options = this.processOptions(options);
@@ -5760,43 +7687,47 @@ Inspector.prototype.addVector3 = function(name,value, options)
 	var dragger1 = new LiteGUI.Dragger(value[0], options );
 	dragger1.root.style.marginLeft = 0;
 	dragger1.root.style.width = "calc( 33% - 1px )";
-	$(element).find(".wcontent").append(dragger1.root);
+	element.querySelector(".wcontent").appendChild( dragger1.root );
 
 	options.tab_index = this.tab_index;
 	this.tab_index++;
 
 	var dragger2 = new LiteGUI.Dragger(value[1], options );
 	dragger2.root.style.width = "calc( 33% - 1px )";
-	$(element).find(".wcontent").append(dragger2.root);
+	element.querySelector(".wcontent").appendChild( dragger2.root );
 
 	options.tab_index = this.tab_index;
 	this.tab_index++;
 
 	var dragger3 = new LiteGUI.Dragger(value[2], options );
 	dragger3.root.style.width = "calc( 33% - 1px )";
-	$(element).find(".wcontent").append(dragger3.root);
+	element.querySelector(".wcontent").appendChild( dragger3.root );
 
-	$(dragger1.root).bind("start_dragging", inner_before_change.bind(options) );
-	$(dragger2.root).bind("start_dragging", inner_before_change.bind(options) );
-	$(dragger3.root).bind("start_dragging", inner_before_change.bind(options) );
+	dragger1.root.addEventListener( "start_dragging", inner_before_change.bind(options) );
+	dragger2.root.addEventListener( "start_dragging", inner_before_change.bind(options) );
+	dragger3.root.addEventListener( "start_dragging", inner_before_change.bind(options) );
 
 	function inner_before_change(e)
 	{
 		if(this.callback_before) this.callback_before();
 	}
 
-	$(element).find("input").change( function(e) { 
+	var inputs = element.querySelectorAll("input");
+	for(var i = 0; i < inputs.length; ++i)
+		inputs[i].addEventListener("change", function(e) { 
 		//gather all three parameters
 		var r = [];
-		var elems = $(element).find("input");
+		var elems = inputs;
 		for(var i = 0; i < elems.length; i++)
 			r.push( parseFloat( elems[i].value ) );
+
+		LiteGUI.trigger( element, "wbeforechange", [r] );
 
 		that.values[name] = r;
 
 		if(options.callback)
 		{
-			var new_val = options.callback.call(element,r); 
+			var new_val = options.callback.call( element,r ); 
 			
 			if(typeof(new_val) == "object" && new_val.length >= 3)
 			{
@@ -5806,20 +7737,41 @@ Inspector.prototype.addVector3 = function(name,value, options)
 			}
 		}
 
-		$(element).trigger("wchange",[r]);
-		if(that.onchange) that.onchange(name,r,element);
+		LiteGUI.trigger( element, "wchange",[r]);
+		if(that.onchange)
+			that.onchange(name,r,element);
 	});
 
 	this.append(element,options);
 
-	element.setValue = function(v) { 
-		dragger1.setValue(v[0]);
-		dragger2.setValue(v[1]);
-		dragger3.setValue(v[2]);
+	element.setValue = function( v, skip_event ) { 
+		if(!v)
+			return;
+		dragger1.setValue(v[0],true);
+		dragger2.setValue(v[1],true);
+		dragger3.setValue(v[2],skip_event); //last triggers
 	}
+
+	this.processElement(element, options);
 	return element;
 }
 
+/**
+* Widget to edit two numbers (it adds a dragging mini widget in the right side)
+* @method addVector4
+* @param {string} name 
+* @param {vec4} value 
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - callback: function to call once the value changes
+* - disabled: shows the widget disabled
+* - callback: function to call when the string is edited
+* - precision: number of digits after the colon
+* - units: string to show after the number
+* - min: minimum value accepted
+* - max: maximum value accepted
+* - step: increments when draggin the mouse (default is 0.1)
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
 Inspector.prototype.addVector4 = function(name,value, options)
 {
 	options = this.processOptions(options);
@@ -5830,7 +7782,7 @@ Inspector.prototype.addVector4 = function(name,value, options)
 	var that = this;
 	this.values[name] = value;
 	
-	var element = this.createWidget(name,"", options);
+	var element = this.createWidget( name,"", options );
 
 	options.step = options.step || 0.1;
 	//options.dragger_class = "mini";
@@ -5845,80 +7797,227 @@ Inspector.prototype.addVector4 = function(name,value, options)
 		var dragger = new LiteGUI.Dragger(value[i], options );
 		dragger.root.style.marginLeft = 0;
 		dragger.root.style.width = "calc( 25% - 1px )";
-		$(element).find(".wcontent").append(dragger.root);
+		element.querySelector(".wcontent").appendChild( dragger.root );
 		options.tab_index = this.tab_index;
 		this.tab_index++;
-		$(dragger.root).bind("start_dragging", inner_before_change.bind(options) );
+		dragger.root.addEventListener("start_dragging", inner_before_change.bind(options) );
 		draggers.push(dragger);
 	}
 
 	function inner_before_change(e)
 	{
-		if(this.callback_before) this.callback_before();
+		if(this.callback_before)
+			this.callback_before();
 	}
 
-	$(element).find("input").change( function(e) { 
+	var inputs = element.querySelectorAll("input");
+	for(var i = 0; i < inputs.length; ++i)
+		inputs[i].addEventListener("change", function(e) { 
 		//gather all parameters
 		var r = [];
-		var elems = $(element).find("input");
+		var elems = inputs;
 		for(var i = 0; i < elems.length; i++)
 			r.push( parseFloat( elems[i].value ) );
+
+		LiteGUI.trigger( element, "wbeforechange", [r] );
 
 		that.values[name] = r;
 
 		if(options.callback)
 		{
-			var new_val = options.callback.call(element,r); 
+			var new_val = options.callback.call( element, r ); 
 			if(typeof(new_val) == "object" && new_val.length >= 4)
 			{
 				for(var i = 0; i < elems.length; i++)
-					$(elems[i]).val(new_val[i]);
+					elems[i].value = new_val[i];
 				r = new_val;
 			}
 		}
 
-		$(element).trigger("wchange",[r]);
-		if(that.onchange) that.onchange(name,r,element);
+		LiteGUI.trigger( element, "wchange",[r]);
+		if(that.onchange)
+			that.onchange(name,r,element);
 	});
 
 	this.append(element,options);
 
-	element.setValue = function(v) { 
+	element.setValue = function( v, skip_event ) { 
+		if(!v)
+			return;
 		for(var i = 0; i < draggers.length; i++)
-			draggers[i].setValue(v[i]);
+			draggers[i].setValue(v[i],skip_event);
 	}
+
+	this.processElement(element, options);
 	return element;
 }
 
-Inspector.prototype.addTextarea = function(name,value, options)
+/**
+* Widget to edit two numbers using a rectangular pad where you can drag horizontaly and verticaly a handler
+* @method addPad
+* @param {string} name 
+* @param {vec2} value 
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - callback: function to call once the value changes
+* - disabled: shows the widget disabled
+* - callback: function to call when the string is edited
+* - precision: number of digits after the colon
+* - units: string to show after the number
+* - min: minimum value accepted
+* - minx: minimum x value accepted
+* - miny: minimum y value accepted
+* - max: maximum value accepted
+* - maxx: maximum x value accepted
+* - maxy: maximum y value accepted
+* - step: increments when draggin the mouse (default is 0.1)
+* - background: url of image to use as background (it will be streched)
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
+Inspector.prototype.addPad = function(name,value, options)
 {
 	options = this.processOptions(options);
+	if(!options.step)
+		options.step = 0.1;
 
-	value = value || "";
+	value = value || [0,0];
 	var that = this;
 	this.values[name] = value;
-	;
+	
+	var element = this.createWidget(name,"", options);
 
-	var element = this.createWidget(name,"<span class='inputfield textarea "+(options.disabled?"disabled":"")+"'><textarea tabIndex='"+this.tab_index+"' "+(options.disabled?"disabled":"")+">"+value+"</textarea></span>", options);
+	options.step = options.step ||0.1;
+	//options.dragger_class = "medium";
+	options.tab_index = this.tab_index;
+	options.full = true;
 	this.tab_index++;
 
-	element.querySelector(".wcontent textarea").addEventListener( options.immediate ? "keyup" : "change", function(e) { 
-		Inspector.onWidgetChange.call(that,element,name,e.target.value, options);
-	});
+	var minx = options.minx || options.min || 0;
+	var miny = options.miny || options.min || 0;
+	var maxx = options.maxx || options.max || 1;
+	var maxy = options.maxy || options.max || 1;
 
-	if(options.height)
-		$(element).find("textarea").css({height: options.height });
+	var wcontent = element.querySelector(".wcontent");
+
+	var pad = document.createElement("div");
+	pad.className = "litepad";
+	wcontent.appendChild( pad );
+	pad.style.width = "100%";
+	pad.style.height = "100px";
+	if (options.background)
+	{
+		pad.style.backgroundImage = "url('" + options.background + "')";
+		pad.style.backgroundSize = "100%";
+		pad.style.backgroundRepeat = "no-repeat";
+	}
+
+	var handler = document.createElement("div");
+	handler.className = "litepad-handler";
+	pad.appendChild( handler );
+
+	options.tab_index = this.tab_index;
+	this.tab_index++;
+
+	var dragging = false;
+
+	pad._onMouseEvent = function(e)
+	{
+		var b = pad.getBoundingClientRect();
+		e.mousex = e.pageX - b.left;
+		e.mousey = e.pageY - b.top;
+		e.preventDefault();
+		e.stopPropagation();
+
+		if(e.type == "mousedown")
+		{
+			document.body.addEventListener("mousemove", pad._onMouseEvent );
+			document.body.addEventListener("mouseup", pad._onMouseEvent );
+			dragging = true;
+		}
+		else if(e.type == "mousemove")
+		{
+			var x = e.mousex / (b.width);
+			var y = e.mousey / (b.height);
+
+			x = x * (maxx - minx) + minx;
+			y = y * (maxy - miny) + minx;
+
+			var r = [x,y];
+
+			LiteGUI.trigger( element, "wbeforechange", [r] );
+
+			element.setValue(r);
+
+			if(options.callback)
+			{
+				var new_val = options.callback.call( element, r ); 
+				if( new_val && new_val.length >= 2)
+				{
+					for(var i = 0; i < elems.length; i++)
+						element.setValue( new_val );
+				}
+			}
+			
+			LiteGUI.trigger( element, "wchange",[r]);
+			if(that.onchange)
+				that.onchange(name,r,element);
+		}
+		else if(e.type == "mouseup")
+		{
+			dragging = false;
+			document.body.removeEventListener("mousemove", pad._onMouseEvent );
+			document.body.removeEventListener("mouseup", pad._onMouseEvent );
+		}
+
+		return true;
+	}
+
+	pad.addEventListener("mousedown", pad._onMouseEvent );
+
+	element.setValue = function(v,skip_event)
+	{
+		if(v === undefined)
+			return;
+
+		var b = pad.getBoundingClientRect();
+		var x = (v[0] - minx) / (maxx - minx);
+		var y = (v[1] - miny) / (maxy - miny);
+		x = Math.max( 0, Math.min( x, 1 ) ); //clamp
+		y = Math.max( 0, Math.min( y, 1 ) );
+
+		//handler.style.left = (x * (b.width - 10)) + "px";
+		//handler.style.top = (y * (b.height - 10)) + "px";
+		var w = ((b.width - 10) / b.width) * 100;
+		var h = ((b.height - 10) / b.height) * 100;
+		handler.style.left = (x * w).toFixed(1) + "%";
+		handler.style.top = (y * h).toFixed(1) + "%";
+
+		//if(!skip_event)
+		//	LiteGUI.trigger(this,"change");
+	}
+
 	this.append(element,options);
 
-	element.setValue = function(v) { $(this).find("textarea").val(v).change(); };
+	element.setValue( value );
+
+	this.processElement(element, options);
 	return element;
 }
 
+/**
+* Widget to show plain information in HTML (not interactive)
+* @method addInfo
+* @param {string} name 
+* @param {string} value HTML code
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - className: to specify a classname of the content
+* - height: to specify a height
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
 Inspector.prototype.addInfo = function(name,value, options)
 {
 	options = this.processOptions(options);
 
-	value = value || "";
+	value = (value === undefined || value === null) ? "" : value;
 	var element = null;
 	if(name != null)
 		element = this.createWidget(name,value, options);
@@ -5936,21 +8035,41 @@ Inspector.prototype.addInfo = function(name,value, options)
 			element.innerHTML = "<span class='winfo'>"+value+"</span>";
 	}
 
-	var info = element.querySelector(".winfo");
+	var info = element.querySelector(".winfo") || element.querySelector(".wcontent");
 
-	element.setValue = function(v) { info.innerHTML = v; };
+	element.setValue = function(v) { 
+		if(v === undefined)
+			return;
+		if(info)
+			info.innerHTML = v;
+	};
 
 	if(options.height)
 	{
 		var content = element.querySelector("span.info_content");
-		content.style.height = typeof(options.height) == "string" ? options.height : options.height + "px";
+		if(!content)
+			return;
+		content.style.height = LiteGUI.sizeToCSS(options.height);
 		content.style.overflow = "auto";
 	}
 
 	this.append(element,options);
+	this.processElement(element, options);
 	return element;
 }
 
+/**
+* Widget to edit a number using a slider
+* @method addSlider
+* @param {string} name 
+* @param {number} value 
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - min: min value
+* - max: max value
+* - step: increments when dragging
+* - callback: function to call once the value changes
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
 Inspector.prototype.addSlider = function(name, value, options)
 {
 	options = this.processOptions(options);
@@ -5965,6 +8084,8 @@ Inspector.prototype.addSlider = function(name, value, options)
 		options.step = 0.01;
 
 	var that = this;
+	if(value === undefined || value === null)
+		value = 0;
 	this.values[name] = value;
 
 	var element = this.createWidget(name,"<span class='inputfield full'>\
@@ -5975,92 +8096,52 @@ Inspector.prototype.addSlider = function(name, value, options)
 	var slider = new LiteGUI.Slider(value,options);
 	slider_container.appendChild(slider.root);
 
+	//Text change -> update slider
 	var skip_change = false; //used to avoid recursive loops
 	var text_input = element.querySelector(".slider-text");
-	$(text_input).on('change', function() {
-		if(skip_change) return;
-
-		var v = parseFloat( $(this).val() );
-		/*
-		if(v > options.max)
-		{
-			skip_change = true;
-			slider.setValue( options.max );
-			skip_change = false;
-		}
-		else
-		*/
+	text_input.addEventListener('change', function(e) {
+		if(skip_change)
+			return;
+		var v = parseFloat( this.value );
+		value = v;
 		slider.setValue( v );
-
-		Inspector.onWidgetChange.call(that,element,name,v, options);
+		Inspector.onWidgetChange.call( that,element,name,v, options );
 	});
 
-	$(slider.root).on("change", function(e,v) {
-		text_input.value = v;
-		Inspector.onWidgetChange.call(that,element,name,v, options);
-	});
-
-	
-	/*
-	//var element = this.createWidget(name,"<span class='inputfield'><input tabIndex='"+this.tab_index+"' type='text' class='fixed nano' value='"+value+"' /></span><div class='wslider'></div>", options);
-	var element = this.createWidget(name,"<span class='inputfield'>\
-				<input tabIndex='"+this.tab_index+"' type='text' class='slider-text fixed nano' value='"+value+"' /></span>\
-				<span class='ui-slider'>\
-				<input class='slider-input' type='range' step='"+options.step+"' min='"+ options.min +"' max='"+ options.max +"'/><span class='slider-thumb'></span></span>", options);
-
-	this.tab_index++;
-
-	var text_input = $(element).find(".slider-text");
-	var slider_input = $(element).find(".slider-input");
-	var slider_thumb = $(element).find(".slider-thumb");
-
-	slider_input.bind('input', inner_slider_move );
-
-	var skip_change = false; //used to avoid recursive loops
-	text_input.bind('change', function() {
-		if(skip_change) return;
-
-		var v = parseFloat( $(this).val() );
-		if(v > options.max)
-		{
-			skip_change = true;
-			slider_input.val( options.max );
-			skip_change = false;
-		}
-		else
-			slider_input.val(v);
-
-		var vnormalized = (v - options.min) / (options.max - options.min);
-		if(vnormalized > 1) vnormalized = 1;
-		else if(vnormalized < 0) vnormalized = 0;
-
-		slider_thumb.css({left: (vnormalized * ($(slider_input).width() - 12)) });
-		Inspector.onWidgetChange.call(that,element,name,v, options);
-	});
-
-	function inner_slider_move(e)
-	{
-		var v = parseFloat( e.target.value );
-		var vnormalized = (v - options.min) / (options.max - options.min);
-		if(!skip_change)
-		{
-			text_input.val(v);
-			Inspector.onWidgetChange.call(that,element,name,v, options);
-		}
-		slider_thumb.css({left: (vnormalized * 90).toFixed(2) + "%" });
-	}
-
-	*/
+	//Slider change -> update Text
+	slider.onChange = function(value) {
+		text_input.value = value;
+		Inspector.onWidgetChange.call( that, element, name, value, options);
+	};
 
 	this.append(element,options);
-	element.setValue = function(v) { slider.setValue(v); };
-	//skip_change = true;
-	//slider_input.val(value).trigger("input");
-	//skip_change = false;
+
+	element.setValue = function(v,skip_event) { 
+		if(v === undefined)
+			return;
+		value = v;
+		slider.setValue(v,skip_event);
+	};
+	element.getValue = function() { 
+		return value;
+	};
+
+	this.processElement(element, options);
 	return element;
 }
 
-
+/**
+* Widget to edit a boolean value using a checkbox
+* @method addCheckbox
+* @param {string} name 
+* @param {boolean} value 
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - label: text to show, otherwise it shows on/off
+* - label_on: text to show when on
+* - label_off: text to show when off
+* - callback: function to call once the value changes
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
 Inspector.prototype.addCheckbox = function(name, value, options)
 {
 	options = this.processOptions(options);
@@ -6096,16 +8177,26 @@ Inspector.prototype.addCheckbox = function(name, value, options)
 	
 	element.data = value;
 
-	element.setValue = function(v) { 
-		if(	that.values[name] != v)
+	element.setValue = function(v,skip_event) { 
+		if(v === undefined)
+			return;
+		if(	that.values[name] != v && !skip_event)
 			LiteGUI.trigger( checkbox, "click" ); 
 	};
 
 	this.append(element,options);
+	this.processElement(element, options);
 	return element;
 }
 
-Inspector.prototype.addFlags = function(flags, force_flags)
+/**
+* Widget to edit a set of boolean values using checkboxes
+* @method addFlags
+* @param {Object} value object that contains all the booleans 
+* @param {Object} optional object with extra flags to insert
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
+Inspector.prototype.addFlags = function(flags, force_flags, options)
 {
 	var f = {};
 	for(var i in flags)
@@ -6117,15 +8208,31 @@ Inspector.prototype.addFlags = function(flags, force_flags)
 
 	for(var i in f)
 	{
-		this.addCheckbox(i, f[i], { callback: (function(j) {
-			return function(v) { 
-				flags[j] = v;
-			}
-		})(i)
-		});
+		var flag_options = {};
+		for(var j in options)
+			flag_options[j] = options[j];
+
+		flag_options.callback = (function(j) {
+				return function(v) { 
+					flags[j] = v;
+				}
+			})(i);
+
+		this.addCheckbox(i, f[i], flag_options );
 	}
 }
 
+/**
+* Widget to edit an enumeration using a combobox
+* @method addCombo
+* @param {string} name 
+* @param {*} value 
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - values: a list with all the possible values, it could be an array, or an object, in case of an object, the key is the string to show, the value is the value to assign
+* - disabled: true to disable
+* - callback: function to call once an items is clicked
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
 Inspector.prototype.addCombo = function(name, value, options)
 {
 	options = this.processOptions(options);
@@ -6134,57 +8241,119 @@ Inspector.prototype.addCombo = function(name, value, options)
 	var that = this;
 	this.values[name] = value;
 	
-	var code = "<select tabIndex='"+this.tab_index+"' "+(options.disabled?"disabled":"")+" class='"+(options.disabled?"disabled":"")+"'>";
 	this.tab_index++;
 
 	var element = this.createWidget(name,"<span class='inputfield full inputcombo "+(options.disabled?"disabled":"")+"'></span>", options);
 	element.options = options;
 
 	var values = options.values || [];
+	if(values.constructor === Function)
+		values = options.values();
 
-	if(options.values)
+	/*
+	if(!values)
+		values = [];
+
+	var index = 0;
+	for(var i in values)
 	{
-		if (typeof(values) == "function")
-			values = options.values();
-		else
-			values = options.values;
-		if(values) 
-			for(var i in values)
-			{
-				var item_value = values[i];
-				code += "<option data-value='" + item_value + "' "+( item_value == value ? " selected":"")+">" + ( values.length ? item_value : i) + "</option>";
-			}
+		var item_value = values[i];
+		var item_index = values.constructor === Array ? index : i;
+		var item_title = values.constructor === Array ? item_value : i;
+		if(item_value && item_value.title)
+			item_title = item_value.title;
+		code += "<option value='"+item_index+"' "+( item_value == value ? " selected":"")+" data-index='"+item_index+"'>" + item_title + "</option>";
+		index++;
 	}
-	code += "</select>";
+	*/
 
+	var code = "<select tabIndex='"+this.tab_index+"' "+(options.disabled?"disabled":"")+" class='"+(options.disabled?"disabled":"")+"'></select>";
 	element.querySelector("span.inputcombo").innerHTML = code;
+	setValues(values);
+	
+	var stop_event = false; //used internally
 
-	$(element).find(".wcontent select").change( function(e) { 
-		var value = e.target.value;
-		if(values && values.constructor != Array)
-			value = values[value];
-		Inspector.onWidgetChange.call(that,element,name,value, options);
+	var select = element.querySelector(".wcontent select");
+	select.addEventListener("change", function(e) { 
+		var index = e.target.value;
+		var value = values[index];
+		if(stop_event)
+			return;
+		Inspector.onWidgetChange.call( that,element,name,value, options );
 	});
 
-	element.setValue = function(v) { 
+	element.setValue = function(v, skip_event) { 
+		if(v === undefined)
+			return;
+		value = v;
 		var select = element.querySelector("select");
 		var items = select.querySelectorAll("option");
-		var index = 0;
+		var index =  -1;
+		if(values.constructor === Array)
+			index = values.indexOf(v);
+		else
+		{
+			//search the element index in the values
+			var j = 0;
+			for(var i in values)
+			{
+				if(values[j] == v)
+				{
+					index = j;
+					break;
+				}
+				else
+					j++;
+			}
+		}
+
+		if(index == -1)
+			return;
+			
+		stop_event = skip_event;
+
 		for(var i in items)
 		{
 			var item = items[i];
 			if(!item || !item.dataset) //weird bug
 				continue;
-			if( item.dataset["value"] == v )
+			if( parseFloat(item.dataset["index"]) == index )
 			{
+				item.setAttribute("selected", true);
 				select.selectedIndex = index;
-				return;
 			}
-			index++;
+			else
+				item.removeAttribute("selected");
 		}
+		
+		stop_event = false;
 	};
 
+	function setValues(v, selected){
+		if(!v)
+			v = [];
+		values = v;
+		if(selected)
+			value = selected;
+		var code = "";
+		var index = 0;
+		for(var i in values)
+		{
+			var item_value = values[i];
+			var item_index = values.constructor === Array ? index : i;
+			var item_title = values.constructor === Array ? item_value : i;
+			if(item_value && item_value.title)
+				item_title = item_value.title;
+			code += "<option value='"+item_index+"' "+( item_value == value ? " selected":"")+" data-index='"+item_index+"'>" + item_title + "</option>";
+			index++;
+		}
+		element.querySelector("select").innerHTML = code;
+	}
+
+	element.setOptionValues = setValues;
+
 	this.append(element,options);
+	this.processElement(element, options);
 	return element;
 }
 
@@ -6202,18 +8371,22 @@ Inspector.prototype.addComboButtons = function(name, value, options)
 			code += "<button class='wcombobutton "+(value == options.values[i] ? "selected":"")+"' data-name='options.values[i]'>" + options.values[i] + "</button>";
 
 	var element = this.createWidget(name,code, options);
-	$(element).find(".wcontent button").click( function(e) { 
+	var buttons = element.querySelectorAll( ".wcontent button" );
+	LiteGUI.bind( buttons, "click", function(e) { 
 
 		var buttonname = e.target.innerHTML;
 		that.values[name] = buttonname;
 
-		$(element).find(".selected").removeClass("selected");
-		$(this).addClass("selected");
+		var elements = element.querySelectorAll(".selected");
+		for(var i in elements)
+			elements.classList.remove("selected");
+		this.classList.add("selected");
 
-		Inspector.onWidgetChange.call(that,element,name,buttonname, options);
+		Inspector.onWidgetChange.call( that,element,name,buttonname, options );
 	});
 
 	this.append(element,options);
+	this.processElement(element, options);
 	return element;
 }
 
@@ -6240,7 +8413,8 @@ Inspector.prototype.addTags = function(name, value, options)
 		inner_addtag(options.value[i]);
 
 	//combo change
-	$(element).find(".wcontent select").change( function(e) { 
+	var select_element = element.querySelector(".wcontent select");
+	select_element.addEventListener("change", function(e) { 
 		inner_addtag(e.target.value);
 	});
 
@@ -6248,6 +8422,8 @@ Inspector.prototype.addTags = function(name, value, options)
 	{
 		if( element.tags[tagname] )
 			return; //repeated tags no
+
+		LiteGUI.trigger( element, "wbeforechange", element.tags);
 
 		element.tags[tagname] = true;
 
@@ -6257,112 +8433,191 @@ Inspector.prototype.addTags = function(name, value, options)
 		tag.innerHTML = tagname+"<span class='close'>X</span>";
 
 		tag.querySelector(".close").addEventListener("click", function(e) {
-			var tagname = $(this).parent()[0].data;
+			var tagname = this.parentNode.data;
 			delete element.tags[tagname];
-			$(this).parent().remove();
-			$(element).trigger("wremoved", tagname );
+			LiteGUI.remove(this.parentNode);
+			LiteGUI.trigger( element, "wremoved", tagname );
 			Inspector.onWidgetChange.call(that,element,name,element.tags, options);
 		});
 
 		element.querySelector(".wtagscontainer").appendChild(tag);
 
 		that.values[name] = element.tags;
-		if(options.callback) options.callback.call(element,element.tags); 
-		$(element).trigger("wchange",element.tags);
-		$(element).trigger("wadded",tagname);
-		if(that.onchange) that.onchange(name, element.tags, element);
+		if(options.callback)
+			options.callback.call( element, element.tags ); 
+		LiteGUI.trigger( element, "wchange", element.tags);
+		LiteGUI.trigger( element, "wadded", tagname);
+		if(that.onchange)
+			that.onchange(name, element.tags, element);
 	}
 
 	this.append(element,options);
+	this.processElement(element, options);
 	return element;
 }
 
+/**
+* Widget to select from a list of items
+* @method addList
+* @param {string} name 
+* @param {*} value [Array or Object]
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - multiselection: allow multiple selection
+* - callback: function to call once an items is clicked
+* - selected: the item selected
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
 Inspector.prototype.addList = function(name, values, options)
 {
 	options = this.processOptions(options);
 
 	var that = this;
 	
-	var height = "";
+	var list_height = "";
 	if(options.height)
-		height = "style='height: "+options.height+"px; overflow: auto;'";
+		list_height = "style='height: 100%; overflow: auto;'";
+		//height = "style='height: "+options.height+"px; overflow: auto;'";
 
-	var code = "<ul class='lite-list' "+height+" tabIndex='"+this.tab_index+"'><ul>";
+	var code = "<ul class='lite-list' "+list_height+" tabIndex='"+this.tab_index+"'><ul>";
 	this.tab_index++;
 
-	var element = this.createWidget(name,"<span class='inputfield full "+(options.disabled?"disabled":"")+"'>"+code+"</span>", options);
+	var element = this.createWidget(name,"<span class='inputfield full "+(options.disabled?"disabled":"")+"' style='height: 100%;'>"+code+"</span>", options);
 
-	$(element).find("ul").focus(function() {
-		$(document).on("keypress",inner_key);
-	});
+	var infocontent = element.querySelector(".info_content");
+	infocontent.style.height = "100%";
 
-	$(element).find("ul").blur(function() {
-		$(document).off("keypress",inner_key);
-	});
+	var inputfield = element.querySelector(".inputfield");
+	inputfield.style.height = "100%";
+	inputfield.style.paddingBottom = "0.2em";
+
+	var ul_elements = element.querySelectorAll("ul");
+	for(var i = 0; i < ul_elements.length; ++i)
+	{
+		var ul = ul_elements[i];
+		ul.addEventListener("focus",function() { 
+			document.addEventListener("keydown",inner_key,true);
+		});
+		ul.addEventListener("blur",function() {
+			document.removeEventListener("keydown",inner_key,true);
+		});
+	}
 
 	function inner_key(e)
 	{
-		var selected = $(element).find("li.selected");
-		if(!selected || !selected.length) return;
+		var selected = element.querySelector("li.selected");
+		if( !selected )
+			return;
 
 		if(e.keyCode == 40)
 		{
-			var next = selected.next();
-			if(next && next.length)
-				$(next[0]).click();
+			var next = selected.nextSibling;
+			if(next)
+				LiteGUI.trigger(next, "click");
 		}
 		else if(e.keyCode == 38)
 		{
-			var prev = selected.prev();
-			if(prev && prev.length)
-				$(prev[0]).click();
+			var prev = selected.previousSibling;
+			if(prev)
+				LiteGUI.trigger(prev,"click");
 		}
+		else
+			return;
+
+		e.preventDefault();
+		e.stopPropagation();
+		return true;
 	}
 
 	function inner_item_click(e) { 
 
 		if(options.multiselection)
-			$(this).toggleClass("selected");
+			this.classList.toggle("selected");
 		else
 		{
 			//batch action, jquery...
-			$(element).find("li").removeClass("selected");
-			$(this).addClass("selected");
+			var lis = element.querySelectorAll("li");
+			for(var i = 0; i < lis.length; ++i)
+				lis[i].classList.remove("selected");
+			this.classList.add("selected");
 		}
 
 		var value = values[ this.dataset["pos"] ];
 		//if(options.callback) options.callback.call(element,value); //done in onWidgetChange
 		Inspector.onWidgetChange.call(that,element,name,value, options);
-		$(element).trigger("wadded",value);
+		LiteGUI.trigger(element, "wadded", value );
 	}
 
-	element.updateItems = function(new_values)
+	function inner_item_dblclick(e) { 
+		var value = values[ this.dataset["pos"] ];
+		if(options.callback_dblclick)
+			options.callback_dblclick.call(that,value);
+	}
+
+	element.updateItems = function( new_values, item_selected )
 	{
+		item_selected = item_selected || options.selected;
 		var code = "";
 		values = new_values;
+		var ul = this.querySelector("ul");
+		ul.innerHTML = "";
+
 		if(values)
 			for(var i in values)
 			{
-				var item_name = values[i]; //array
+				var	value = values[i];
+				var item_name = values.constructor === Array ? value : i;
+				if(!item_name)
+					item_name = i;
+				var item_title = item_name.constructor === String ? item_name : i;
+				var item_style = null;
+				if(item_name && item_name.constructor === String)
+					item_name = item_name.replace(/<(?:.|\n)*?>/gm, ''); //remove html tags that could break the html
 
 				var icon = "";
-				if(	values[i].length == null ) //object
+				if( value === null || value === undefined )
 				{
-					item_name = values[i].name ? values[i].name : i;
-					if(values[i].icon)
-						icon = "<img src='"+values[i].icon+"' class='icon' />";
+				
+				}
+				else if( value.constructor === String || value.constructor === Number || value.constructor === Boolean )
+				{
+					//?
+				}
+				else if( value )
+				{
+					item_title = value.content || value.name || i;
+					item_style = value.style;
+					if(value.icon)
+						icon = "<img src='"+value.icon+"' class='icon' />";
 				}
 
-				code += "<li className='item-"+i+" "+(typeof(values[i]) == "object" && values[i].selected ? "selected":"") + "' data-name='"+item_name+"' data-pos='"+i+"'>" + icon + item_name + "</li>";
+				var selected = false;
+				if( (typeof(values[i]) == "object" && values[i].selected) || (item_selected == values[i]) )
+					selected = true;
+				var li_element = document.createElement("li");
+				li_element.classList.add( 'item-' + LiteGUI.safeName(i) );
+				if( selected )
+					li_element.classList.add( 'selected' );
+				li_element.dataset["name"] = item_name;
+				li_element.dataset["pos"] = i;
+				li_element.value = values[i];
+				if(item_style)
+					li_element.setAttribute("style", item_style );
+				li_element.innerHTML = icon + item_title;
+				//code += "<li class='item-" + i + " " + (selected ? "selected":"") + "' data-name='" + item_name + "' data-pos='"+i+"' "+item_style+">" + icon + item_title + "</li>";
+				ul.appendChild( li_element );
+				li_element.addEventListener( "click", inner_item_click );
+				if(options.callback_dblclick)
+					li_element.addEventListener( "dblclick", inner_item_dblclick );
 			}
 
-		this.querySelector("ul").innerHTML = code;
-		$(this).find(".wcontent li").click( inner_item_click );
+		//ul.innerHTML = code;
+		LiteGUI.bind( ul.querySelectorAll("li"), "click", inner_item_click );
+		//$(this).find(".wcontent li").click( inner_item_click );
 	}
 
 	element.removeItem = function(name)
 	{
-		var items = $(element).find(".wcontent li");
+		var items = element.querySelectorAll(".wcontent li");
 		for(var i = 0; i < items.length; i++)
 		{
 			if(items[i].dataset["name"] == name)
@@ -6370,7 +8625,7 @@ Inspector.prototype.addList = function(name, values, options)
 		}
 	}
 
-	element.updateItems(values);
+	element.updateItems( values, options.selected );
 	this.append(element,options);
 
 	element.getSelected = function()
@@ -6388,7 +8643,7 @@ Inspector.prototype.addList = function(name, values, options)
 		return items[num];
 	}
 
-	element.selectIndex = function(num)
+	element.selectIndex = function( num, add_to_selection )
 	{
 		var items = this.querySelectorAll("ul li");
 		for(var i = 0; i < items.length; ++i)
@@ -6396,7 +8651,7 @@ Inspector.prototype.addList = function(name, values, options)
 			var item = items[i];
 			if(i == num)
 				item.classList.add("selected");
-			else
+			else if(!add_to_selection)
 				item.classList.remove("selected");
 		}
 		return items[num];
@@ -6419,18 +8674,34 @@ Inspector.prototype.addList = function(name, values, options)
 			var item = items[i];
 			if( item.classList.contains("selected") )
 				continue;
-			$(item).click();
+			//$(item).click();
+			LiteGUI.trigger( item, "click" );
 		}
-		return r;
 	}
 
 	element.setValue = function(v)
 	{
+		if(v === undefined)
+			return;
 		this.updateItems(v);
 	}
 
+	element.filter = function(callback)
+	{
+		var items = this.querySelectorAll("ul li");
+		for(var i = 0; i < items.length; ++i)
+		{
+			var item = items[i];
+			if( !callback( item.value, item ) )
+				item.style.display = "none";
+			else
+				item.style.display = "";
+		}
+	}
+
 	if(options.height) 
-		$(element).scroll(0);
+		element.scrollTop = 0;
+	this.processElement(element, options);
 	return element;
 }
 
@@ -6438,26 +8709,41 @@ Inspector.prototype.addButton = function(name, value, options)
 {
 	options = this.processOptions(options);
 
-	value = value || "";
+	value = options.button_text || value || "";
 	var that = this;
 
-	var c = "";
+	var button_classname = "";
 	if(name === null)
-		c = "single";
+		button_classname = "single";
+	if(options.micro)
+		button_classname += " micro";
+
+	var attrs = "";
+	if(options.disabled)
+		attrs = "disabled='disabled'";
 	
-	var element = this.createWidget(name,"<button class='"+c+"' tabIndex='"+ this.tab_index + "'>"+value+"</button>", options);
+	var element = this.createWidget(name,"<button class='litebutton "+button_classname+"' tabIndex='"+ this.tab_index + "' "+attrs+">"+value+"</button>", options);
 	this.tab_index++;
 	var button = element.querySelector("button");
-	button.addEventListener("click", function() {
-		Inspector.onWidgetChange.call(that,element,name,this.innerHTML, options);
+	button.addEventListener("click", function(event) {
+		Inspector.onWidgetChange.call( that, element, name, this.innerHTML, options, false, event);
 		LiteGUI.trigger( button, "wclick", value );
 	});
 	this.append(element,options);
 
 	element.wclick = function(callback) { 
 		if(!options.disabled)
-			$(this).wclick(callback); 
+			LiteGUI.bind(this, "wclick", callback ); 
 	}
+
+	element.setValue = function(v)
+	{
+		if(v === undefined)
+			return;
+		button.innerHTML = v;
+	}
+
+	this.processElement(element, options);
 	return element;
 }
 
@@ -6469,12 +8755,14 @@ Inspector.prototype.addButtons = function(name, value, options)
 	var that = this;
 
 	var code = "";
-	var w = "calc("+(100/value.length).toFixed(3)+"% - "+Math.floor(16/value.length)+"px);";
+	//var w = "calc("+(100/value.length).toFixed(3)+"% - "+Math.floor(16/value.length)+"px);";
+	var w = "calc( " + (100/value.length).toFixed(3) + "% - 4px )";
+	var style = "width:"+w+"; width: -moz-"+w+"; width: -webkit-"+w+"; margin: 2px;";
 	if(value && typeof(value) == "object")
 	{
 		for(var i in value)
 		{
-			code += "<button tabIndex='"+this.tab_index+"' style=' width:"+w+" width: -moz-"+w+" width: -webkit-calc("+(89/value.length).toFixed(3)+"%)'>"+value[i]+"</button>";
+			code += "<button class='litebutton' tabIndex='"+this.tab_index+"' style='"+style+"'>"+value[i]+"</button>";
 			this.tab_index++;
 		}
 	}
@@ -6483,13 +8771,14 @@ Inspector.prototype.addButtons = function(name, value, options)
 	for(var i = 0; i < buttons.length; ++i)
 	{
 		var button = buttons[i];
-		button.addEventListener("click", function() {
-			Inspector.onWidgetChange.call(that,element,name,this.innerHTML, options);
+		button.addEventListener("click", function(evt) {
+			Inspector.onWidgetChange.call(that, element, name, this.innerHTML, options, null, evt);
 			LiteGUI.trigger( element, "wclick",this.innerHTML );
 		});
 	}
 
 	this.append(element,options);
+	this.processElement(element, options);
 	return element;
 }
 
@@ -6544,6 +8833,8 @@ Inspector.prototype.addIcon = function(name, value, options)
 	this.append(element,options);
 
 	element.setValue = function(v, skip_event ) { 
+		if(v === undefined)
+			return;
 		value = v;
 		var y = value ? height : 0;
 		icon.style.backgroundPosition = x + "px " + y + "px";
@@ -6551,11 +8842,11 @@ Inspector.prototype.addIcon = function(name, value, options)
 			Inspector.onWidgetChange.call(that,element,name, value, options);
 	};
 	element.getValue = function() { return value; };
-
+	this.processElement(element, options);
 	return element;
 }
 
-Inspector.prototype.addColor = function(name,value,options)
+Inspector.prototype.addColor = function( name, value, options )
 {
 	options = this.processOptions(options);
 
@@ -6572,61 +8863,116 @@ Inspector.prototype.addColor = function(name,value,options)
 	this.append(element,options); //add now or jscolor dont work
 
 	//create jsColor 
-	var input_element = $(element).find("input.color")[0];
-	var myColor = new jscolor.color(input_element);
-	myColor.pickerFaceColor = "#333";
-	myColor.pickerBorderColor = "black";
-	myColor.pickerInsetColor = "#222";
-	myColor.rgb_intensity = 1.0;
+	var input_element = element.querySelector("input.color");
+	var myColor = null;
 
-	if(options.disabled) 
-		myColor.pickerOnfocus = false; //this doesnt work
-
-	if(typeof(value) != "string" && value.length && value.length > 2)
+	if( window.jscolor )
 	{
-		var intensity = 1.0;
-		myColor.fromRGB(value[0]*intensity,value[1]*intensity,value[2]*intensity);
-		myColor.rgb_intensity = intensity;
+
+		//SHOWS CONTEXTUAL MENU
+		//block focusing
+		/*
+		input_element.addEventListener("contextmenu", function(e) { 
+			if(e.button != 2) //right button
+				return false;
+			//create the context menu
+			var contextmenu = new LiteGUI.ContextMenu( ["Copy in HEX","Copy in RGBA"], { event: e, callback: inner_action });
+			e.preventDefault(); 
+			e.stopPropagation();
+
+			input_element.addEventListener("focus", block_focus , true);
+			setTimeout(function(){ input_element.removeEventListener("focus", block_focus , true);},1000);
+
+			return false;
+		},true);	
+
+		function block_focus(e)
+		{
+			e.stopPropagation();
+			e.stopImmediatePropagation();
+			e.preventDefault();
+			return false;
+		}
+
+		function inner_action(v)
+		{
+			if(v == "Copy in HEX")
+			{
+				LiteGUI.toClipboard( "in HEX");
+			}
+			else
+			{
+				LiteGUI.toClipboard( "in RGB");
+			}
+		}
+		*/
+
+		myColor = new jscolor.color(input_element);
+		myColor.pickerFaceColor = "#333";
+		myColor.pickerBorderColor = "black";
+		myColor.pickerInsetColor = "#222";
+		myColor.rgb_intensity = 1.0;
+
+		if(options.disabled) 
+			myColor.pickerOnfocus = false; //this doesnt work
+
+		if( value.constructor !== String && value.length && value.length > 2)
+		{
+			var intensity = 1.0;
+			myColor.fromRGB(value[0]*intensity,value[1]*intensity,value[2]*intensity);
+			myColor.rgb_intensity = intensity;
+		}
+
+		//update values in rgb format
+		input_element.addEventListener("change", function(e) { 
+			var rgbelement = element.querySelector(".rgb-color");
+			if(rgbelement)
+				rgbelement.innerHTML = LiteGUI.Inspector.parseColor(myColor.rgb);
+		});
+
+		myColor.onImmediateChange = function() 
+		{
+			var v = [ myColor.rgb[0] * myColor.rgb_intensity, myColor.rgb[1] * myColor.rgb_intensity, myColor.rgb[2] * myColor.rgb_intensity ];
+			//Inspector.onWidgetChange.call(that,element,name,v, options);
+			var event_data = [v.concat(), myColor.toString()];
+			LiteGUI.trigger( element, "wbeforechange", event_data );
+			that.values[name] = v;
+			if(options.callback)
+				options.callback.call( element, v.concat(), "#" + myColor.toString(), myColor );
+			LiteGUI.trigger( element, "wchange", event_data );
+			if(that.onchange) that.onchange(name, v.concat(), element);
+		}
+
+		//alpha dragger
+		options.step = options.step || 0.01;
+		options.dragger_class = "nano";
+
+		var dragger = new LiteGUI.Dragger(1, options);
+		element.querySelector('.wcontent').appendChild(dragger.root);
+		dragger.input.addEventListener("change", function(e)
+		{
+			var v = parseFloat( this.value );
+			myColor.rgb_intensity = v;
+			if (myColor.onImmediateChange)
+				myColor.onImmediateChange();
+		});
+
+		element.setValue = function(value,skip_event) { 
+			myColor.fromRGB(value[0],value[1],value[2]);
+			if(!skip_event)
+				LiteGUI.trigger( dragger.input, "change" ); 
+		};
+	}
+	else
+	{
+		input_element.addEventListener("change", function(e) { 
+			var rgbelement = element.querySelector(".rgb-color");
+			if(rgbelement)
+				rgbelement.innerHTML = LiteGUI.Inspector.parseColor(myColor.rgb);
+		});
 	}
 
-	//update values in rgb format
-	input_element.addEventListener("change", function(e) { 
-		var rgbelement = element.querySelector(".rgb-color");
-		if(rgbelement)
-			rgbelement.innerHTML = LiteGUI.Inspector.parseColor(myColor.rgb);
-	});
-
-	myColor.onImmediateChange = function() 
-	{
-		var v = [ myColor.rgb[0] * myColor.rgb_intensity, myColor.rgb[1] * myColor.rgb_intensity, myColor.rgb[2] * myColor.rgb_intensity ];
-		//Inspector.onWidgetChange.call(that,element,name,v, options);
-
-		that.values[name] = v;
-		if(options.callback)
-			options.callback.call(element, v.concat(), "#" + myColor.toString(), myColor);
-		$(element).trigger("wchange",[v.concat(), myColor.toString()]);
-		if(that.onchange) that.onchange(name, v.concat(), element);
-	}
-
-	//alpha dragger
-	options.step = options.step || 0.01;
-	options.dragger_class = "nano";
-
-	var dragger = new LiteGUI.Dragger(1, options);
-	$(element).find('.wcontent').append(dragger.root);
-	$(dragger.input).change(function()
-	{
-		var v = parseFloat($(this).val());
-		myColor.rgb_intensity = v;
-		if (myColor.onImmediateChange)
-			myColor.onImmediateChange();
-	});
-
-	element.setValue = function(value) { 
-		myColor.fromRGB(value[0],value[1],value[2]);
-		$(dragger.input).change(); 
-	};
-
+	this.processElement(element, options);
 	return element;
 }
 
@@ -6638,12 +8984,16 @@ Inspector.prototype.addFile = function(name, value, options)
 	var that = this;
 	this.values[name] = value;
 	
-	var element = this.createWidget(name,"<span class='inputfield full whidden'><span class='filename'>"+value+"</span><input type='file' size='100' class='file' value='"+value+"'/></span>", options);
+	var element = this.createWidget(name,"<span class='inputfield full whidden' style='width: calc(100% - 26px)'><span class='filename'>"+value+"</span></span><button class='litebutton' style='width:20px; margin-left: 2px;'>...</button><input type='file' size='100' class='file' value='"+value+"'/>", options);
+	var content = element.querySelector(".wcontent");
+	content.style.position = "relative";
 	var input = element.querySelector(".wcontent input");
+	var filename_element = element.querySelector(".wcontent .filename");
 	input.addEventListener("change", function(e) { 
 		if(!e.target.files.length)
 		{
-			$(element).find(".filename").html("");
+			//nothing
+			filename_element.innerHTML = "";
 			Inspector.onWidgetChange.call(that, element, name, null, options);
 			return;
 		}
@@ -6652,8 +9002,26 @@ Inspector.prototype.addFile = function(name, value, options)
 		if( options.generate_url )
 			url = URL.createObjectURL( e.target.files[0] );
 		var data = { url: url, filename: e.target.value, file: e.target.files[0], files: e.target.files };
-		$(element).find(".filename").html( e.target.value );
-		Inspector.onWidgetChange.call(that, element, name, data, options);
+
+		if(options.read_file)
+		{
+			 var reader = new FileReader();
+			 reader.onload = function(e2){
+				data.data = e2.target.result;
+				Inspector.onWidgetChange.call( that, element, name, data, options );
+			 }
+			 if( options.read_file == "binary" )
+				 reader.readAsArrayBuffer( data.file );
+			 else if( options.read_file == "data_url" )
+				 reader.readAsDataURL( data.file );
+			 else
+				 reader.readAsText( data.file );
+		}
+		else
+		{
+			filename_element.innerHTML = e.target.files[0].name;
+			Inspector.onWidgetChange.call( that, element, name, data, options );
+		}
 	});
 
 	this.append(element,options);
@@ -6671,11 +9039,13 @@ Inspector.prototype.addLine = function(name, value, options)
 	var element = this.createWidget(name,"<span class='line-editor'></span>", options);
 
 	var line_editor = new LiteGUI.LineEditor(value,options);
-	$(element).find("span.line-editor").append(line_editor);
+	element.querySelector("span.line-editor").appendChild(line_editor);
 
-	$(line_editor).change( function(e) { 
-		if(options.callback) options.callback.call(element,e.target.value);
-		$(element).trigger("wchange",[e.target.value]);
+	LiteGUI.bind( line_editor, "change", function(e) { 
+		LiteGUI.trigger(element, "wbeforechange",[e.target.value]);
+		if(options.callback)
+			options.callback.call( element,e.target.value );
+		LiteGUI.trigger(element, "wchange",[e.target.value]);
 		Inspector.onWidgetChange.call(that,element,name,e.target.value, options);
 	});
 
@@ -6690,7 +9060,7 @@ Inspector.prototype.addTree = function(name, value, options)
 	value = value || "";
 	var element = this.createWidget(name,"<div class='wtree inputfield full'></div>", options);
 	
-	var tree_root = $(element).find(".wtree")[0];
+	var tree_root = element.querySelector(".wtree");
 	if(options.height)
 	{
 		tree_root.style.height = typeof(options.height) == "number" ? options.height + "px" : options.height;
@@ -6702,7 +9072,7 @@ Inspector.prototype.addTree = function(name, value, options)
 	var tree = element.tree = new LiteGUI.Tree(null,value, options.tree_options);
 	tree.onItemSelected = function(node, data) {
 		if(options.callback)
-			options.callback(node,data);
+			options.callback.call( element, node, data);
 	};
 
 	tree_root.appendChild(tree.root);
@@ -6712,6 +9082,7 @@ Inspector.prototype.addTree = function(name, value, options)
 	};
 
 	this.append(element,options);
+	this.processElement(element, options);
 	return element;
 }
 
@@ -6722,12 +9093,12 @@ Inspector.prototype.addDataTree = function(name, value, options)
 	value = value || "";
 	var element = this.createWidget(name,"<div class='wtree'></div>", options);
 	
-	var node = $(element).find(".wtree")[0];
+	var node = element.querySelector(".wtree");
 	var current = value;
 
 	inner_recursive(node,value);
 
-	function inner_recursive(root_node, value)
+	function inner_recursive( root_node, value)
 	{
 		for(var i in value)
 		{
@@ -6736,7 +9107,7 @@ Inspector.prototype.addDataTree = function(name, value, options)
 			if( typeof( value[i] ) == "object" )
 			{
 				e.innerHTML = "<span class='itemname'>" + i + "</span><span class='itemcontent'></span>";
-				inner_recursive($(e).find(".itemcontent")[0], value[i] );
+				inner_recursive( e.querySelector(".itemcontent"), value[i] );
 			}
 			else
 				e.innerHTML = "<span class='itemname'>" + i + "</span><span class='itemvalue'>" + value[i] + "</span>";
@@ -6747,6 +9118,346 @@ Inspector.prototype.addDataTree = function(name, value, options)
 	this.append(element,options);
 	return element;
 }
+
+/**
+* Widget to edit an array of values of a certain type
+* @method addArray
+* @param {string} name 
+* @param {Array} value 
+* @param {Object} options, here is a list for this widget (check createWidget for a list of generic options):
+* - data_type: the type of every value inside the array
+* - data_options: options for the widgets of every item in the array
+* - max_items: max number of items to show from the array, default is 100
+* - callback: function to call once an items inside the array has changed
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
+Inspector.prototype.addArray = function( name, value, options )
+{
+	var that = this;
+
+	if( !value || value.constructor !== Array )
+	{
+		console.error("Inspector: Array widget value must be a valid array" );
+		return;
+	}
+
+	options = this.processOptions(options);
+
+	var container = this.addContainer( name, options );
+	var widgets = [];
+	var type = options.data_type || "string";
+	container.value = value;
+	var max_items = options.max_items || 100;
+
+	//length widget
+	this.widgets_per_row = 3;
+	this.addInfo(name,null,{width: 100});
+	var length_widget = this.addString( "length", value.length || "0", function(v){ 
+		value.length = parseInt(v);
+		refresh.call( container );
+	});
+
+	this.addButtons( null,["+","-"], function(v){
+		if(v == "+")
+			value.length = value.length + 1;
+		else if(value.length > 0)
+			value.length = value.length - 1;
+		length_widget.setValue( value.length );
+		refresh.call( container );
+	});
+
+	this.widgets_per_row = 1;
+
+	refresh.call( container );
+
+	function refresh()
+	{
+		var value = this.value;
+		var old_size = widgets.length;
+		var new_size = value.length;
+
+		//clear extra widgets
+		if(new_size < old_size)
+		{
+			for(var i = new_size; i < widgets.length; ++i)
+			{
+				if(	widgets[ i ] )
+					widgets[ i ].remove();
+			}
+			widgets.length = new_size;
+		}
+
+		if(new_size > old_size)
+		{
+			for(var i = old_size; i < new_size && i < max_items; ++i)
+			{
+				var v = null;
+				if (value[i] !== undefined)
+					v = value[i];
+				var item_options = { widget_parent: container, name_width: 30, callback: assign.bind({value: this.value, index: i}) };
+				if(options.data_options)
+					for(var j in options.data_options)
+						item_options[j] = options.data_options[j];
+				var w = that.add( type, i, v, item_options );
+				widgets.push( w );
+			}
+		}
+	}
+
+	function assign(v)
+	{
+		this.value[ this.index ] = v;
+		if(options.callback)
+			options.callback.call( container, this.value, this.index );
+		//todo: trigger change
+	}
+
+	container.setValue = function(v)
+	{
+		this.value = v;
+		refresh.call(this);
+	}
+
+	container.getValue = function()
+	{
+		return this.value = v;
+	}
+
+	//this.append(element,options);
+	return container;
+}
+
+//***** containers ********/
+//creates an empty container but it is not set active
+Inspector.prototype.addContainer = function(name, options)
+{
+	var element = this.startContainer(null,options);
+	this.endContainer();
+	return element;
+}
+
+//creates an empty container and sets its as active
+Inspector.prototype.startContainer = function(name, options)
+{
+	options = this.processOptions(options);
+
+	var element = document.createElement("DIV");
+	element.className = "wcontainer";
+	this.applyOptions(element, options);
+	this.row_number = 0;
+
+	this.append( element );
+	this.pushContainer( element );
+
+	if(options.widgets_per_row)
+		this.widgets_per_row = options.widgets_per_row;
+
+	if(options.height)
+	{
+		element.style.height = LiteGUI.sizeToCSS( options.height );
+		element.style.overflow = "auto";
+	}
+
+	element.refresh = function()
+	{
+		if(element.on_refresh)
+			element.on_refresh.call(this, element);
+	}
+
+	return element;
+}
+
+Inspector.prototype.endContainer = function(name, options)
+{
+	this.popContainer();
+}
+
+//it is like a group but they cant be nested inside containers
+Inspector.prototype.addSection = function( name, options )
+{
+	options = this.processOptions(options);
+	var that = this;
+
+	if(this.current_section)
+		this.current_section.end();
+
+	var element = document.createElement("DIV");
+	element.className = "wsection";
+	if(!name) 
+		element.className += " notitle";
+	if(options.className)
+		element.className += " " + options.className;
+	if(options.collapsed)
+		element.className += " collapsed";
+
+	if(options.id)
+		element.id = options.id;
+	if(options.instance)
+		element.instance = options.instance;
+
+	var code = "";
+	if(name)
+		code += "<div class='wsectiontitle'>"+(options.no_collapse ? "" : "<span class='switch-section-button'></span>")+name+"</div>";
+	code += "<div class='wsectioncontent'></div>";
+	element.innerHTML = code;
+
+	//append to inspector
+	element._last_container_stack = this._current_container_stack.concat();
+	//this.append( element ); //sections are added to the root, not to the current container
+	this.root.appendChild( element );
+	this.sections.push( element );
+
+	element.sectiontitle = element.querySelector(".wsectiontitle");
+
+	if(name)
+		element.sectiontitle.addEventListener("click",function(e) {
+			if(e.target.localName == "button") 
+				return;
+			element.classList.toggle("collapsed");
+			var seccont = element.querySelector(".wsectioncontent");
+			seccont.style.display = seccont.style.display === "none" ? null : "none";
+			if(options.callback)
+				options.callback.call( element, !element.classList.contains("collapsed") );
+		});
+
+	if(options.collapsed)
+		element.querySelector(".wsectioncontent").style.display = "none";
+
+	this.setCurrentSection( element );
+
+	if(options.widgets_per_row)
+		this.widgets_per_row = options.widgets_per_row;
+
+	element.refresh = function()
+	{
+		if(element.on_refresh)
+			element.on_refresh.call(this, element);
+	}
+
+	element.end = function()
+	{
+		if(that.current_section != this)
+			return;
+
+		that._current_container_stack = this._last_container_stack;
+
+		var content = this.querySelector(".wsectioncontent");
+		if(!content)
+			return;
+		if( that.isContainerInStack( content ) )
+			that.popContainer( content );
+		that.current_section = null;
+	}
+
+	return element;
+}
+
+//change current section (allows to add widgets to previous sections)
+Inspector.prototype.setCurrentSection = function( section )
+{
+	if( this.current_section == section )
+		return;
+
+	this.current_section = section;
+
+	var parent = section.parentNode;
+	this.popContainer( parent ); //go back till that container
+
+	var content = section.querySelector(".wsectioncontent");
+	this.pushContainer( content );
+}
+
+Inspector.prototype.getCurrentSection = function()
+{
+	for(var i = this._current_container_stack.length - 1; i >= 0; --i)
+	{
+		var container = this._current_container_stack[i];
+		if(container.classList.contains("wsectioncontent"))
+			return container.parentNode;
+	}
+	return null;
+}
+
+Inspector.prototype.endCurrentSection = function()
+{
+	if(this.current_section)
+		this.current_section.end();
+}
+
+//A container of widgets with a title 
+Inspector.prototype.beginGroup = function( name, options )
+{
+	options = this.processOptions(options);
+
+	var element = document.createElement("DIV");
+	element.className = "wgroup";
+	name = name || "";
+	element.innerHTML = "<div class='wgroupheader "+ (options.title ? "wtitle" : "") +"'><span class='switch-section-button'></span>"+name+"</div>";
+	element.group = true;
+
+	var content = document.createElement("DIV");
+	content.className = "wgroupcontent";
+	if(options.collapsed)
+		content.style.display = "none";
+	element.appendChild( content );
+
+	var collapsed = options.collapsed || false;
+	var header = element.querySelector(".wgroupheader");
+	if(collapsed)
+		header.classList.add("collapsed");
+	header.addEventListener("click", function(e) { 
+		var style = element.querySelector(".wgroupcontent").style;
+		style.display = style.display === "none" ? "" : "none";
+		collapsed = !collapsed;
+		if(collapsed)
+			header.classList.add("collapsed");
+		else
+			header.classList.remove("collapsed");
+		//element.querySelector(".switch-section-button").innerHTML = (collapsed ? "+" : "-");
+		e.preventDefault();
+	});
+
+	this.append( element, options );
+	this.pushContainer( content );
+	return element;
+}
+
+Inspector.prototype.endGroup = function()
+{
+	do
+	{
+		this.popContainer();
+	}
+	while( this._current_container && !this._current_container.classList.contains("wgroupcontent") )
+}
+
+/**
+* Creates a title bar in the widgets list to help separate widgets
+* @method addTitle
+* @param {string} title 
+* @param {Object} options
+* @return {HTMLElement} the widget in the form of the DOM element that contains it
+**/
+Inspector.prototype.addTitle = function(title,options)
+{
+	options = this.processOptions(options);
+
+	var element = document.createElement("DIV");
+	var code = "<span class='wtitle'><span class='text'>"+title+"</span>";
+	if(options.help)
+	{
+		code += "<span class='help'><div class='help-content'>"+options.help+"</div></span>";
+	}
+	code += "</span>";
+	element.innerHTML = code;
+	element.setValue = function(v) { 
+		this.querySelector(".text").innerHTML = v;
+	};
+	this.row_number = 0;
+	this.append(element, options);
+	return element;
+}
+
 
 Inspector.prototype.scrollTo = function( id )
 {
@@ -6835,6 +9546,26 @@ Inspector.prototype.processOptions = function(options)
 	if(typeof(options) == "function")
 		options = { callback: options };
 	return options || {};
+}
+
+Inspector.prototype.processElement = function(element, options)
+{
+	if(options.callback_update && element.setValue)
+	{
+		element.on_update = function(){
+			this.setValue( options.callback_update.call(this), true );
+		}
+	}
+}
+
+Inspector.prototype.updateWidgets = function()
+{
+	for(var i = 0; i < this.widgets.length; ++i)
+	{
+		var widget = this.widgets[i];
+		if(widget.on_update)
+			widget.on_update( widget );
+	}
 }
 
 Inspector.parseColor = function(color)

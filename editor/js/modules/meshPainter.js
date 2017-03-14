@@ -53,7 +53,7 @@ var MeshPainter = {
 		this.painted_node = node;
 		if(!node) return;
 
-		this.collision_mesh = node.getLODMesh() || node.getMesh();
+		this.collision_mesh = node.getMesh( true );
 		this.painted_mesh = node.getMesh();
 
 		if(!this.collision_mesh)
@@ -75,16 +75,35 @@ var MeshPainter = {
 		if(this.dialog)
 			this.dialog.close();
 
-		var dialog = new LiteGUI.Dialog("dialog_mesh_painter", {title:"Mesh Painter", parent:"#visor", close: true, minimize: true, width: 300, height: 440, scroll: false, draggable: true});
+		var dialog = new LiteGUI.Dialog( { title:"Mesh Painter", parent:"#visor", close: true, minimize: true, width: 300, height: 440, scroll: false, draggable: true});
 		dialog.show('fade');
 		dialog.setPosition(100,100);
 		this.dialog = dialog;
 
-		var widgets = new LiteGUI.Inspector("painting_widgets",{ name_width: "50%" });
+		var widgets = new LiteGUI.Inspector( { name_width: "50%" });
 		widgets.onchange = function()
 		{
 			RenderModule.requestFrame();
 		}
+
+		dialog.add( widgets );
+
+		this.inspect( widgets, dialog, on_refresh );
+
+
+		function on_refresh()
+		{
+			widgets.addSeparator();
+			widgets.addButton("", "Close" , { callback: function (value) { 
+				dialog.close(); 
+			}});
+			dialog.adjustSize();	
+		}
+	},
+
+	inspect: function( widgets, dialog, on_refresh )
+	{
+		widgets = widgets || InterfaceModule.inspector_widget.inspector;
 
 		inner_update();
 
@@ -106,6 +125,10 @@ var MeshPainter = {
 			}});
 
 			if(!MeshPainter.painted_node)
+				return;
+
+			/*
+			if(!MeshPainter.painted_node)
 			{
 				widgets.addButton("", "Close" , { callback: function (value) { 
 					dialog.close(); 
@@ -114,6 +137,7 @@ var MeshPainter = {
 				dialog.adjustSize();
 				return;
 			}
+			*/
 
 			var node = MeshPainter.painted_node;
 			var material = node.getMaterial();
@@ -121,18 +145,17 @@ var MeshPainter = {
 			//create material
 			if(!material)
 			{
-				var selected_material_class = LS.Material;
+				var selected_material_class = LS.MaterialClasses["StandardMaterial"];
 				widgets.addInfo(null,"Material not found in object");
-				widgets.addCombo("MaterialClasses", "Material", { values: LS.MaterialClasses, callback: function(material_class) { 
+				widgets.addCombo("MaterialClasses", selected_material_class, { values: LS.MaterialClasses, callback: function(material_class) { 
 					selected_material_class = material_class;
 				}});
 
 				widgets.addButton("No material", "Create Material", function(){
 					var mat = new selected_material_class();
-					node.setMaterial( mat );
+					node.material = mat;
 					inner_update();
 				});
-				dialog.adjustSize(10);
 				return;
 			}
 
@@ -175,11 +198,6 @@ var MeshPainter = {
 					MeshPainter.createTexture( node, MeshPainter.settings.channel );
 					inner_update();
 				}});
-				widgets.addSeparator();
-				widgets.addButton("", "Close" , { callback: function (value) { 
-					dialog.close(); 
-				}});
-				dialog.adjustSize();	
 				return;
 			}
 			else
@@ -210,10 +228,12 @@ var MeshPainter = {
 				MeshPainter.brush.size = v;
 			}});
 			//widgets.addNumber("Spread", MeshPainter.brush.spread, { min:0.1, step: 0.1, callback: function(v) { MeshPainter.brush.spread = v; }});
+			widgets.widgets_per_row = 2;
+			var widget_color = widgets.addColor("Color", MeshPainter.brush.color, { callback: function (value) { vec3.copy( MeshPainter.brush.color, value ); }});
 			widgets.addSlider("Alpha", MeshPainter.brush.alpha, { min:0.01, max: 1, callback: function(v) { 
 				MeshPainter.brush.alpha = v;
 			}});
-			var widget_color = widgets.addColor("Color", MeshPainter.brush.color, { callback: function (value) { vec3.copy( MeshPainter.brush.color, value ); }});
+			widgets.widgets_per_row = 1;
 			widgets.addCheckbox("Blending", MeshPainter.brush.blending, { callback: function(v) { MeshPainter.brush.blending = v; }});
 
 			widgets.widgets_per_row = 4;
@@ -229,19 +249,23 @@ var MeshPainter = {
 				//vec3.copy( MeshPainter.brushcolor, [0.5,0.5,1.0] ); 
 			}});
 
-			widgets.addSeparator();
-			widgets.addButton("", "Close" , { callback: function (value) { 
-				dialog.close(); 
+			widgets.addTitle("Actions");
+			widgets.widgets_per_row = 2;
+			var fill_color = [0,0,0];
+			widgets.addColor("Fill Color",fill_color, { callback: function(v){ fill_color = v; }});
+			widgets.addButton(null,"Fill", { callback: function(v){ 
+				if(!MeshPainter.current_texture)
+					return;
+				MeshPainter.current_texture.fill(fill_color);
+				LS.GlobalScene.requestFrame();
 			}});
-			dialog.adjustSize();	
+			widgets.widgets_per_row = 1;
+
+
+			if(on_refresh)
+				on_refresh();
 
 		}//inner update
-
-
-		$(dialog.content).append(widgets.root);
-		dialog.adjustSize();		
-
-		//widgets.addString("Name", last_file ? last_file.name : "");
 	},
 
 	cloneTextureInChannel: function()
@@ -282,6 +306,10 @@ var MeshPainter = {
 		if(!mat) 
 			return;
 
+		var sampler = mat.getTextureSampler( channel );
+		if(sampler)
+			sampler.minFilter = GL.LINEAR;
+
 		this.current_texture = mat.getTexture( channel );
 		if(!this.current_texture)
 			return;
@@ -296,8 +324,10 @@ var MeshPainter = {
 		EditorModule.refreshAttributes();
 	},
 
-	createTexture: function(node, channel, name)
+	createTexture: function( node, channel, name )
 	{
+		channel = channel || "color";
+
 		var tex_size = this.settings.tex_size || 512;
 		this.current_texture = new GL.Texture(tex_size,tex_size, { format: gl.RGB, magFilter: gl.LINEAR, minFilter: gl.LINEAR_MIPMAP_LINEAR });
 		var tex_name = name || "texture_" + (Math.random() * 1000).toFixed();
@@ -308,16 +338,16 @@ var MeshPainter = {
 		gl.texParameteri(this.current_texture.texture_type, gl.TEXTURE_MIN_FILTER, gl.LINEAR );
 		this.current_texture.unbind();
 
-		ResourcesManager.registerResource(tex_name, this.current_texture);
+		LS.ResourcesManager.registerResource( tex_name, this.current_texture);
 
 		var mat = node.getMaterial();
 		if(!mat)
 		{
-			mat = new Material();
+			mat = new LS.Material();
 			node.material = mat;
 		}
 
-		mat.setTexture(channel, tex_name);
+		mat.setTexture( channel, tex_name);
 		var bg_color = this.settings.bg_color || [1,1,1];
 		this.current_texture.drawTo( function() {
 			gl.clearColor(bg_color[0],bg_color[1],bg_color[2],1);
@@ -325,25 +355,26 @@ var MeshPainter = {
 		});
 
 		RenderModule.requestFrame();
-		EditorModule.inspectNode( node );
+		EditorModule.inspect( node );
 	},
 
 	//*********************
 	testRay: function(ray)
 	{
-		if(!this.painted_node || !this.collision_mesh || !this.collision_mesh.octree) return null;
+		if(!this.painted_node || !this.collision_mesh || !this.collision_mesh.octree)
+			return null;
 
 		var node = this.painted_node;
 
 		//compute ray
 		var model = node.transform.getGlobalMatrix();
 		var inv = mat4.invert( mat4.create(), model );
-		mat4.multiplyVec3(ray.start, inv, ray.start );
+		mat4.multiplyVec3(ray.origin, inv, ray.origin );
 		mat4.rotateVec3(ray.direction, inv, ray.direction );
 		vec3.normalize(ray.direction, ray.direction);
 
 		//test hit
-		var hit = this.collision_mesh.octree.testRay( ray.start, ray.direction, 0.0, 10000 );
+		var hit = this.collision_mesh.octree.testRay( ray.origin, ray.direction, 0.0, 10000 );
 		if(hit)
 		{
 			mat4.multiplyVec3(hit.pos, model, hit.pos);
@@ -541,7 +572,7 @@ MeshPainter._brush_pixel_shader = "\n\
 	}\n\
 ";
 
-LiteGUI.registerModule( MeshPainter );
+CORE.registerModule( MeshPainter );
 
 var meshPainterTool = {
 	name: "painter",
@@ -578,7 +609,8 @@ var meshPainterTool = {
 
 	onClick: function()
 	{
-		MeshPainter.showPaintingDialog();
+		//MeshPainter.showPaintingDialog();
+		MeshPainter.inspect();
 	},
 
 	render: function()
@@ -588,8 +620,8 @@ var meshPainterTool = {
 
 		var camera = MeshPainter.getCamera();
 
-		//Draw.setViewProjectionMatrix( Renderer._view_matrix, Renderer._projection_matrix, Renderer._viewprojection_matrix );
-		Draw.setCamera( camera );
+		//LS.Draw.setViewProjectionMatrix( Renderer._view_matrix, Renderer._projection_matrix, Renderer._viewprojection_matrix );
+		LS.Draw.setCamera( camera );
 		var uniforms = MeshPainter.uniforms;
 
 		MeshPainter.uniforms.u_vp.set( camera._viewprojection_matrix );
@@ -602,7 +634,12 @@ var meshPainterTool = {
 			var shader_brush = this._shader_brush;
 			if(!shader_brush)
 				shader_brush = this._shader_brush = new GL.Shader( MeshPainter._brush_vertex_shader, MeshPainter._brush_pixel_shader); 
-			var model = MeshPainter.getPaintedNode().transform.getGlobalMatrix();
+
+			var painted_node = MeshPainter.getPaintedNode();
+			if(!painted_node || !painted_node.transform)
+				return;
+
+			var model = painted_node.transform.getGlobalMatrix();
 
 			gl.enable( gl.BLEND );
 			gl.depthFunc( gl.LEQUAL );
@@ -614,23 +651,23 @@ var meshPainterTool = {
 			uniforms.u_brushcolor.set( MeshPainter.brush.color );
 			uniforms.u_brushcolor[3] = MeshPainter.brush.alpha * 3.0;
 
-			Draw.push();
-			Draw.setMatrix( model );
+			LS.Draw.push();
+			LS.Draw.setMatrix( model );
 			shader_brush.uniforms( uniforms );
-			Draw.renderMesh( MeshPainter.painted_mesh, gl.TRIANGLES, shader_brush );
-			Draw.pop();
+			LS.Draw.renderMesh( MeshPainter.painted_mesh, gl.TRIANGLES, shader_brush );
+			LS.Draw.pop();
 
 			gl.depthFunc( gl.LESS );
 
 			if(1) //render brush sphere
 			{
-				Draw.setColor( MeshPainter.brush.color );
-				Draw.setAlpha(0.1);
-				Draw.push();
-				Draw.translate( MeshPainter.collision_pos );
-				Draw.scale( [MeshPainter.brush.size, MeshPainter.brush.size, MeshPainter.brush.size] );
-				Draw.renderMesh( MeshPainter.sphere_mesh, gl.TRIANGLES );
-				Draw.pop();
+				LS.Draw.setColor( MeshPainter.brush.color );
+				LS.Draw.setAlpha(0.1);
+				LS.Draw.push();
+				LS.Draw.translate( MeshPainter.collision_pos );
+				LS.Draw.scale( [MeshPainter.brush.size, MeshPainter.brush.size, MeshPainter.brush.size] );
+				LS.Draw.renderMesh( MeshPainter.sphere_mesh, gl.TRIANGLES );
+				LS.Draw.pop();
 			}
 			gl.disable( gl.BLEND );
 		}
@@ -724,6 +761,11 @@ var meshPainterTool = {
 
 		RenderModule.requestFrame();
 	},
+	
+	inspect: function( widgets, dialog )
+	{
+		return MeshPainter.inspect( widgets, dialog );
+	}
 };
 
-ToolsModule.registerTool(meshPainterTool);
+ToolsModule.registerTool( meshPainterTool );

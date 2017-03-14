@@ -3,49 +3,24 @@ var CodingModule = //do not change
 	name: "Code",
 	bigicon: "imgs/tabicon-code.png",
 
-	eval: function(code) { return new Function(code); }, //done to have line number, do not move
+	show_sceneview: true, //3d view
+	show_panel: false, //side panel
 
-	autocompile: false, //assign code to component on every keystroke
+	is_sceneview_visible: true, 
 
-	default_sceneview: true,
-	wrap_lines: false,
-	sceneview_visible: true, //side panel
-
-	global_context: null, //used to store coding context info (the codemirror, etc)
-	context: {},
-	editor: null, //codemirror editor instance
 	APIs: {}, //here you can register function calls of the API
-
 	windows: [], //external windows
-
-	codemirror_scripts: ["js/extra/codemirror/codemirror.js",
-								"js/extra/codemirror/hint/show-hint.js",
-								"js/extra/codemirror/hint/javascript-hint.js",
-								"js/extra/codemirror/selection/active-line.js",
-								"js/extra/codemirror/javascript.js"],
-	codemirror_css: ["js/extra/codemirror/codemirror.css",
-							"js/extra/codemirror/blackboard.css",
-							"js/extra/codemirror/hint/show-hint.css"],
 
 	init: function()
 	{
-		if(!gl)
-			return;
-
 		this.tab = LiteGUI.main_tabs.addTab( this.name, {
 			id:"codingtab",
 			bigicon: this.bigicon,
 			size: "full", 
 			callback: function(tab) {
-
-				if(CodingModule.editor)
-					CodingModule.editor.refresh();
-				
-				if(!CodingModule.external_window)
-					CodingModule.show3DWindow( CodingModule.default_sceneview );
-
-				InterfaceModule.setSidePanelVisibility(false);
-				CodingModule.setCodingVisibility(true);
+				CodingModule.show3DWindow( CodingModule.show_sceneview );
+				CodingModule.showSidePanel( CodingModule.show_panel );
+				CodingModule.coding_tabs_widget.refresh();
 			},
 			callback_canopen: function(){
 				//avoid opening the tab if it is in another window
@@ -54,51 +29,50 @@ var CodingModule = //do not change
 			},
 			callback_leave: function() {
 				RenderModule.appendViewportTo(null);
-				CodingModule.assignCurrentCode();
-		}});
+				//CodingModule.assignCurrentCode();
+			},
+			module: this //used to catch keyboard events
+		});
 
 		this.root = LiteGUI.main_tabs.getTab(this.name).content;
 
 		//tabs for every file
-		var files_tabs = new LiteGUI.Tabs("codefiletabs", {});
-		this.root.appendChild( files_tabs.root );
-		files_tabs.root.style.marginTop = "4px";
-		files_tabs.root.style.backgroundColor = "#111";
-		//files_tabs.addTab("+", { });
-		this.files_tabs = files_tabs;
-
-		//coding area is created after loading CodeMirror
-
-		//include codemirror
-		LiteGUI.requireScript( this.codemirror_scripts,
-								function() { 
-									CodingModule.onCodeMirrorLoaded(); 
-								});
-		LiteGUI.requireCSS( this.codemirror_css );
-		LiteGUI.addCSS(".error-line { background-color: #511; }\n\
-						.CodeMirror div.CodeMirror-cursor, .CodeMirror pre { z-index: 0 !important; }\n\
-						.CodeMirror-selected { background-color: rgba(100,100,100,0.5) !important; outline: 1px dashed rgba(255,255,255,0.8); }\n\
-					   ");
-
-		//bind events used save stuff
-		LEvent.bind( LS.GlobalScene, "beforeReload", this.onBeforeReload.bind(this) );
-		LEvent.bind( LS.GlobalScene, "reload", this.onReload.bind(this) );
-		LEvent.bind( LS.GlobalScene, "nodeRemoved", this.onNodeRemoved.bind(this) );
-		LEvent.bind( LS.GlobalScene, "nodeComponentRemoved", this.onComponentRemoved.bind(this) );
-		
-
 		//register some APIs used for autocompletion
-		this.registerAPI("glsl", ["texture2D","sampler2D","uniform","varying","radians","degrees","sin","cos","tan","asin","acos","atan","pow","exp","log","exp2"] );
+		
+		//this.registerAPI("glsl", ["uniform","varying","sampler2D","samplerCube"] );
+		this.registerAPI("glsl", ["texture2D","textureCube","radians","degrees","sin","cos","tan","asin","acos","atan","pow","exp","log","exp2","length"] );
 		this.registerAPI("glsl", ["IN.color","IN.vertex","IN.normal","IN.uv","IN.uv1","IN.camPos","IN.viewDir","IN.worldPos","IN.worldNormal","IN.screenPos"] );
-		this.registerAPI("glsl", ["OUT.Albedo","OUT.Normal","OUT.Emission","OUT.Specular","OUT.Gloss","OUT.Alpha","OUT.Reflectivity"] );
+		this.registerAPI("glsl", ["o.Albedo","o.Normal","o.Emission","o.Specular","o.Gloss","o.Alpha","o.Reflectivity"] );
 
-		LEvent.bind( LS.Components.Script, "code_error", this.onScriptError.bind(this) );
-		LEvent.bind( LS, "code_error", this.onGlobalError.bind(this) );
+		LiteGUI.menubar.add("Window/Coding Panel", { callback: function(){ CodingTabsWidget.createDialog(); }});
+		LiteGUI.menubar.add("Actions/Catch Exceptions", { type: "checkbox", instance: LS, property: "catch_exceptions" });
 
-		LiteGUI.menubar.add("Actions/Catch Errors", { type: "checkbox", instance: LS, property: "catch_errors" });
+		var coding_area = this.coding_area = new LiteGUI.Area("codearea",{height: "100%"});
+		this.root.appendChild( coding_area.root );
+		coding_area.split("horizontal",[null,"50%"],true);
 
-		//LEvent.bind(Scene,"start", this.onStart.bind(this));
-		//LEvent.bind(Scene,"update", this.onUpdate.bind(this));
+		var left_area = coding_area.getSection(0);
+		left_area.split("vertical",[null,"25%"],true);
+
+		this.coding_3D_area = left_area.getSection(0).content;
+		this.console_area = left_area.getSection(1).content;
+
+		//CONSOLE
+		this.console_widget = new ConsoleWidget();
+		this.console_area.appendChild( this.console_widget.root );
+
+		//console._log = console.log;
+		//console.log = this.onConsoleLog.bind(this);
+
+		//CODING
+		var coding_tabs_widget = this.coding_tabs_widget = new CodingTabsWidget();
+		coding_tabs_widget.is_master_editor = true;
+		coding_area.getSection(1).add( coding_tabs_widget );
+		//coding_tabs_widget.onNewTab();
+
+		LEvent.bind( LS, "code_error", this.onCodeError, this );
+
+		LS.catch_exceptions = true;
 	},
 
 	//registers a coding API (help, links to wiki, autocompletion, etc)
@@ -116,14 +90,7 @@ var CodingModule = //do not change
 	openTab: function()
 	{
 		LiteGUI.main_tabs.selectTab( this.name );
-		var info = this.getCurrentCodeInfo();
-		if(!info)
-			this.global_context.editor.setValue("");
-		else if( info.show_3d_view !== undefined )
-			this.show3DWindow( info.show_3d_view );
-
-		this.showInFooter("");
-		CodingModule.setCodingVisibility(true);
+		this.show3DWindow( true );
 	},
 
 	//close coding tab ( back to scene view )
@@ -132,413 +99,167 @@ var CodingModule = //do not change
 		LiteGUI.main_tabs.selectTab( RenderModule.name );
 	},
 
-	//call to say which instance do you want to edit
-	//instance must have a function called getCode
-	/*
-	editInstanceCode: function(instance, options )
-	{
-		//if instance is null then deselect this one (deprecated?)
-		if(!instance)
-		{
-			this._edited_instance = null;
-			this._code_options = null;
-			this._code_lang = null;
-			this._current_API = null;
-			window.node = null;
-			this.global_context.editor.setValue("");
-			return;
-			this.updateCodingVisibility();
-			this.global_context.editor.refresh();
-		}
-
-		options = options || {};
-		var lang = options.lang || "javascript";
-
-		//check for existing tab with this instance
-		if(options.id)
-		{
-			//create tab
-			if(!this.files_tabs.getTab(options.id))
-				this.files_tabs.addTab(options.id, { title: options.title, instance: instance, selected: true, closable: true, callback: function(){ 
-					//save current
-					CodingModule.assignCurrentCode(true); //save the current state of the codemirror inside the instance (otherwise changes would be lost)
-					CodingModule.editInstanceCode(instance, options); 
-				},
-				onclose: function(tab){
-					if(tab.selected)
-						CodingModule.editInstanceCode(null); 
-				}});
-		}
-
-		//save current state
-
-		this._edited_instance = instance;
-		this._code_options = options;
-		this._code_lang = lang;
-		this._current_API = this.APIs[ options.lang ];
-		window.node = instance._root;
-		var code = instance.getCode();
-		this.global_context.editor.setValue( code );
-		this.updateCodingVisibility();
-		this.global_context.editor.refresh();
-
-		if(this.external_window)
-			this.external_window.focus();
-	},
-	*/
-	
 	//switch coding tab
 	editInstanceCode: function( instance, options, open_tab )
 	{
-		options = options || {};
-		var lang = options.lang || "javascript";
-
-		if(open_tab)
-			this.openTab();
-
-		//used when a tab is closed
 		if(!instance)
 			return;
-
-		var current_code_info = this.current_code_info;
-
-		//check if we are editing the current one
-		if(current_code_info)
-		{
-			if(options.id && current_code_info.id == options.id)
-				return;
-			if(!options.id && current_code_info.instance == instance)
-				return;
-		}
-
-		//changing from one tab to another? save state of old tab
-		if( current_code_info )
-		{
-			this.assignCurrentCode(true); //save the current state of the codemirror inside the instance (otherwise changes would be lost)
-			//get cursor pos (line and char)
-			//store in current_tab
-		}
-
-		//compute id
-		var id = options.id || instance.uid || instance.id;
-		var title = options.title || instance.name || id;
-
-		//check if the tab already exists
-		var tab = this.files_tabs.getTab( id );
-		if(tab)
-		{
-			this.files_tabs.selectTab( id ); //this calls onTabClicked
-		}
-		else //doesnt exist? then create a tab for this code
-		{
-			tab = this.files_tabs.addTab( id, { title: title, instance: instance, selected: true, closable: true, callback: onTabClicked, onclose: onTabClosed, skip_callbacks: true });
-			tab.code_info = { id: id, instance: instance, options: options };
-		}
-
-		//update coding context
-		this.current_code_info = tab.code_info;
-		var code = null;
-		if(this.current_code_info.options.getCode)
-			code = this.current_code_info.options.getCode();
-		else
-			code = instance.getCode();
-		if(!code)
-			code = "";
-		this.editor.setValue( code );
-		this.editor.refresh();
-		if(tab.code_info && tab.code_info.pos)
-			this.editor.setCursor( tab.code_info.pos );
-		this.setCodingVisibility(true);
-
-		//global assigments (used for the autocompletion)
-		if(	instance && instance._root )
-		{
-			window.node = instance._root;
-			window.component = instance;
-			window.scene = window.node.scene;
-		}
-		else
-		{
-			window.node = null;
-			window.component = null;
-			window.scene = null;
-		}
-
-		//callbacks ******************************
-		function onTabClicked()
-		{
-			CodingModule.editInstanceCode( instance, options ); 
-		}
-
-		function onTabClosed(tab)
-		{
-			if(tab.selected)
-				CodingModule.editInstanceCode(null); 
-		}
+		if(open_tab)
+			this.openTab();
+		this.coding_tabs_widget.editInstanceCode( instance, options );
 	},
 
 	closeInstanceTab: function( instance, options )
 	{
-		options = options || {};
+		return this.coding_tabs_widget.closeInstanceTab( instance, options );
+	},
 
-		var id = options.id || instance.uid || instance.id;
-		var title = options.title || id;
+	//
+	onNewScript: function( node, type )
+	{
+		type = type || "Script";
+		node = node || SelectionModule.getSelectedNode();
+		if(!node)
+			node = LS.GlobalScene.root;
 
-		//check if the tab already exists
-		var tab = this.files_tabs.getTab( id );
-		if(!tab)
-			return false;
-
-		var info = tab.code_info;
-		this.files_tabs.removeTab( id );
-
-		//open next tab or clear the codemirror editor content
-		if(this.current_code_info == info )
+		if(type == "Script")
 		{
-			this.current_code_info = null;
-			this.editor.setValue("");
+			var component = new LS.Components.Script();
+			node.addComponent( component );
+			this.editInstanceCode( component, { id: component.uid, title: node.id, lang: "javascript", path: component.uid, help: LS.Components.Script.coding_help });
+			this.openTab();
+		} 
+		else if (type == "ScriptFromFile")
+		{
+			var component = new LS.Components.ScriptFromFile();
+			node.addComponent( component );
+		}
+		else if (type == "Global")
+		{
+			LiteGUI.alert("TO DO");
+		}
+	},
+
+	//used to extract editor options of a given instance
+	extractOptionsFromInstance: function( instance, options )
+	{
+		if(!instance)
+		{
+			console.error("instance cannot be null");
+			return;
 		}
 
-		return true;
+		options = options || {};
+
+		//compute id
+		var fullpath = instance.fullpath || instance.filename; //for resources
+		var uid = instance.uid || instance.name; //for components
+		var id = options.id || fullpath || uid;
+		options.id = id;
+
+		if(fullpath)
+			fullpath = LS.RM.cleanFullpath(fullpath);
+
+		//compute title
+		var title = options.title;
+		if(!title)
+		{
+			if(fullpath) //resources
+				title = LS.RM.getFilename( fullpath );
+			if(instance.getComponentTitle) //scripts
+				title = instance.getComponentTitle();
+		}
+		options.title = title || "Script";
+
+		//compute lang
+		var lang = options.lang;
+		if( !lang )
+		{
+			if( instance.constructor.is_material || instance.constructor == LS.ShaderCode ) 
+				lang = "glsl";
+			if( fullpath )
+			{
+				var ext = LS.RM.getExtension(fullpath);
+				if( ext == "js" )
+					lang = "javascript";
+				else if( ext == "txt" )
+					lang = "text";
+				else
+					lang = ext;
+			}
+		}
+		options.lang = lang || "javascript";
+
+		//compute type
+		if(instance.constructor.is_resource)
+			options.type = LS.TYPES.RESOURCE;
+		else if(instance.constructor.is_component)
+			options.type = LS.TYPES.COMPONENT;
+		else if(instance.constructor.is_material)
+			options.type = LS.TYPES.MATERIAL;
+
+		return options;
 	},
 
-	onCodeChange: function(editor)
+	//finds instance from options using id and type
+	findInstance: function( options, callback )
 	{
-		if(this.autocompile)
-			this.assignCurrentCode();
-	},
+		var id = options.id;
+		if(!id)
+		{
+			console.warn("findInstance options without id");
+			return null;
+		}
 
-	//puts the codemirror code inside the instance (component) and triggers event (which will evaluate it)
-	assignCurrentCode: function( skip_events )
-	{
-		var info = this.getCurrentCodeInfo();
-		if(!info)
-			return;
-
-		var instance = info.instance;
-		var code = this.editor.getValue();
-		info.pos = this.editor.getCursor();
-
-		var old_code = null;
-		if(info.options.getCode)
-			old_code = info.options.getCode();
+		//get instance from options
+		if(options.type == LS.TYPES.RESOURCE)
+		{
+			if(LS.RM.resources[ id ])
+				return LS.RM.resources[ id ];
+			LS.RM.load( id, null, function(res){
+				if(callback)
+					callback( res, options );
+			});
+			return null;
+		}
+		else if(options.type == LS.TYPES.COMPONENT)
+		{
+			var comp = LS.GlobalScene.findComponentByUId( id );
+			if(callback)
+				callback( comp, options );
+			return comp;
+		}
 		else
-			old_code = instance.getCode();
-
-		if(code == old_code)
-			return;
-
-		if(info.options.setCode)
-			info.options.setCode( code );
-		else
-			instance.code = code;
-
-		if(skip_events) 
-			return true; 
-
-		LEvent.trigger( instance, "code_changed", code );
-		if( instance.onCodeChange )
-			return instance.onCodeChange( code );
-		return true;
-	},
-
-	//wait codemirror to load before creating anything or there will be problems
-	onCodeMirrorLoaded: function()
-	{
-		this.global_context = this.createCodingArea( this.root );
-		this.editor = this.global_context.editor;
-		this.coding_area = this.global_context.area;
-	},
-
-	showInFooter: function(msg) {
-		this.global_context.workarea.query("#code-footer").innerHTML = msg;
-	},
-
-	getCurrentCodeInfo: function()
-	{
-		return this.current_code_info;
-
-		var current_tab = this.files_tabs.getCurrentTab();
-		if(current_tab && current_tab.code_info)
-			return current_tab.code_info;
+			console.warn("Cannot find code instance: ",id );
 		return null;
 	},
 
-	evalueCode: function()
+	showCodingHelp: function( options )
 	{
-		var info = this.getCurrentCodeInfo();
-		if(!info)
-			return;
-
-		var lang = "javascript";
-		if(info.options && info.options.lang)
-			lang = info.options.lang;
-
-		//non javascript? put the code inside the component and go
-		if( lang != "javascript")
+		var help = options.help;
+		if(!help)
 		{
-			this.assignCurrentCode();
-			return;
+			if(options.type === LS.TYPES.COMPONENT)
+			{
+				window.open( "https://github.com/jagenjo/litescene.js/blob/master/guides/scripting.md"	);
+			}
+			else if(options.type === LS.TYPES.RESOURCE)
+			{
+				if(options.lang == "glsl")
+				{
+					if(LS.ShaderCode.help_url)
+						window.open( LS.ShaderCode.help_url	);
+					return;
+					//help = LS.SurfaceMaterial.coding_help;
+				}
+				else
+					window.open( "https://github.com/jagenjo/litescene.js/blob/master/guides/scripting.md"	);
+			}
+			else
+				return;
 		}
 
-		//Is JS, then try to evaluate it
-		//create a foo class and try to compile the code inside to check that the sintax is correct
-		var code = this.global_context.editor.getValue();
-
-		try
-		{
-			this.last_executed_code = code;
-			code = LScript.expandCode( code ); //multiline strings and other helpers
-			this.eval(code); //this eval is in a line easier to control
-
-			//no errors parsing (but there could be errors in execution)
-			this.showInFooter("code ok");
-			this.markLine(); 
-		}
-		catch (err)
-		{
-			//error parsing
-			this.showError(err);
-			return;
-		}
-
-		//put editor code in instance (it will be evaluated)
-		this.assignCurrentCode(); //this will trigger the error handling during execution
-	},
-
-	addBreakPoint: function()
-	{
-		var info = this.getCurrentCodeInfo();
-		if(!info)
-			return;
-
-		if(info.lang && info.lang != "javascript")
-			return;
-
-		var pos = this.global_context.editor.getCursor();
-		pos.ch = 0;
-		this.global_context.editor.replaceRange("{{debugger}}", pos, pos) 
-	},
-
-	changeFontSize: function(num)
-	{
-		var code_container = this.global_context.code_container;
-		var root = code_container.querySelector(".CodeMirror");
-		var size = root.style.fontSize;
-		if(!size)
-			size = 14;
-		else
-			size = parseInt(size);
-		size += num;
-		root.style.fontSize = size + "px";
-	},
-
-	last_error_line: null,
-	markLine: function(num)
-	{
-		var cm = this.global_context.editor;
-
-		if(typeof(num) == "undefined" && this.last_error_line != null)
-		{
-			var lines = cm.lineCount();
-			for(var i = 0; i < lines; i++)
-				cm.removeLineClass( i, "background", "error-line");
-			//cm.removeLineClass( this.last_error_line, "background", "error-line");
-			this.last_error_line = null;
-			return;
-		}
-
-		if(typeof(num) != "undefined")
-		{
-			if(this.last_error_line != null)
-				cm.removeLineClass( this.last_error_line, "background", "error-line");
-
-			this.last_error_line = num;
-			cm.addLineClass(num, "background", "error-line");
-		}
-	},	
-
-	//save the state 
-	onBeforeReload: function(e)
-	{
-		var state = { tabs: [] };
-
-		//for every tab open
-		for(var i in this.files_tabs.tabs)
-		{
-			var tab = this.files_tabs.tabs[i];
-
-			//get the uid of the component and the cursor info
-			var info = tab.code_info;
-			state.tabs.push( info );
-		}
-		this._saved_state = state;
-	},
-
-	//reload all the codes open
-	onReload: function(e)
-	{
-		if(!this._saved_state)
-			return;
-
-		var state = this._saved_state;
-		this.files_tabs.removeAllTabs();
-
-		for(var i in state.tabs)
-		{
-			var tab = state.tabs[i];
-			var instance = LS.GlobalScene.findComponentByUId( tab.id );
-			this.editInstanceCode( instance, tab.options );
-		}
-
-		this._saved_state = null;
-	},
-
-	onNodeRemoved: function(evt, node)
-	{
-		//check if we are using one script in a tab
-		if(!node)
-			return;
-
-		var components = node.getComponents();
-		for(var i = 0; i < components.length; ++i)
-		{
-			var compo = components[i];
-			//in case is open...
-			this.closeInstanceTab( compo );
-		}
-	},
-
-	onScriptRenamed: function( instance )
-	{
-		if(!instance)
-			return;
-
-		var id = instance.uid;
-		if(!id)
-			return;
-		var tab = this.files_tabs.getTab( id );
-		if(!tab)
-			return;
-		var title = tab.tab.querySelector(".tabtitle");
-		if(title && instance.name)
-			title.innerHTML = instance.name;
-	},
-
-	onComponentRemoved: function(evt, compo )
-	{
-		this.closeInstanceTab( compo );
-	},
-
-	onShowHelp: function()
-	{
-		var info = this.getCurrentCodeInfo();
-		if(!info || !info.options || !info.options.help)
-			return;
-
-		var help = info.options.help;
-
-		var options = {
+		var help_options = {
 			content: "<pre style='padding:10px; height: 200px; overflow: auto'>" + help + "</pre>",
 			title: "Help",
 			draggable: true,
@@ -547,149 +268,64 @@ var CodingModule = //do not change
 			height: 260
 		};
 
-		var dialog = new LiteGUI.Dialog("info_message",options);
+		var dialog = new LiteGUI.Dialog("info_message",help_options);
 		dialog.addButton("Close",{ close: true });
 		dialog.show();
 	},
 
-	onNewScript: function( node )
+	onCodeError: function( e,err )
 	{
-		var component = new LS.Components.Script();
-		node = node || SelectionModule.getSelectedNode();
-		if(!node)
-			node = Scene.root;
-		node.addComponent( component );
+		//if it is an script of ours, open in code editor
+		if(!err.script)
+			return;
+
+		var tab = this.coding_tabs_widget.editInstanceCode( err.script );
+		if(!tab || !tab.pad)
+			return;
+
 		this.openTab();
-		this.editInstanceCode( component, { id: component.uid, title: node.id, lang: "javascript", path: component.uid, help: LS.Components.Script.coding_help });
-	},
+		tab.pad.markError( err.line, err.msg );
 
-	onOpenAllScripts: function()
-	{
-		var nodes = Scene.getNodes();
-		for(var i in nodes)
-		{
-			var node = nodes[i];
-			var comps = node.getComponents();
-			for(var j in comps)
-			{
-				var component = comps[j];
-				if(!component.getCode)
-					continue;
-				if(this.files_tabs.getTab( component.uid ))
-					continue;
-
-				var code = component.getCode();
-				this.editInstanceCode( component, { id: component.uid, title: node.id, lang: "javascript", path: component.uid, help: LS.Components.Script.coding_help });
-			}
-		}
-	},
-
-	onScriptError: function(e, instance_err)
-	{
-		console.trace("Script crashed");
-		var code_info = this.getCurrentCodeInfo();
-		if( code_info.instance != instance_err[0] )
-			return;
-		this.showError(instance_err[1]);
-	},
-
-	onGlobalError: function(e, err)
-	{
-		console.error("Global error");
-		console.trace();
-		console.error(err);
-		var stack = err.stack.split("\n");
-		if(stack[1].indexOf("<anonymous>") == -1)
-			return;
-
-		//could be a error triggered by an async callback
-		this.showError(err);
-	},
-
-	showError: function(err)
-	{
-		//LiteGUI.alert("Error in script\n" + err);
-		console.log("Coding ", err );
-		this.showInFooter("<span style='color: #F55'>Error: " + err.message + "</span>");
-		var num = this.computeLineFromError(err);
-		if(num >= 0)
-			this.markLine(num);
-	},
-
-	computeLineFromError: function(err)
-	{
-		if(err.lineNumber !== undefined)
-		{
-			return err.lineNumber;
-		}
-		else if(err.stack)
-		{
-			var lines = err.stack.split("\n");
-			var line = lines[1].trim();
-			var tokens = line.split(" ");
-			var pos = line.lastIndexOf(":");
-			var pos2 = line.lastIndexOf(":",pos-1);
-			var num = parseInt( line.substr(pos2+1,pos-pos2-1) );
-			var ch = parseInt( line.substr(pos+1, line.length - 2 - pos) );
-			if(tokens[1] == "Object.CodingModule.eval")
-				return -1;
-			if (line.indexOf("LScript") != -1 || line.indexOf("<anonymous>") != -1 )
-				num -= 3; //ignore the header lines of the LScript class
-			return num;
-		}
-		return -1;
-	},
-
-	detachWindow: function()
-	{
-		var that = this;
-		var main_window = window;
-
-		if(!this.external_window)
-		{
-			this.show3DWindow(false);
-			this.external_window = LiteGUI.main_tabs.detachTab( this.name, null, function(){
-				that.external_window = null;
-			});
-		}
-		else
-		{
-			this.external_window.close();
-		}
-	},
-
-	createCodingWindow: function()
-	{
-		var extra_window = LiteGUI.newWindow("Code",800,600);
-		this.windows.push( extra_window );
+		InterfaceModule.setStatusBar("Error in code: " + err.msg, "error" );
 	},
 
 	//shows the side 3d window
 	show3DWindow: function(v)
 	{
-		this.sceneview_visible = v;
-		var info = this.getCurrentCodeInfo();
-		if(info)
-			info.show_3d_view = !!v;
+		if(v === undefined)
+			v = !this.is_sceneview_visible;
+		this.is_sceneview_visible = v;
+		this.show_sceneview = v;
 
 		if(v)
 		{
-			RenderModule.appendViewportTo( this.coding_area.sections[1].content );
-			this.coding_area.showSection(1);
+			RenderModule.appendViewportTo( this.coding_area.sections[0].content );
+			this.coding_area.showSection(0);
 		}
 		else
 		{
 			RenderModule.appendViewportTo(null);
-			this.coding_area.hideSection(1);
+			this.coding_area.hideSection(0);
 		}
 	},
 
-	setCodingVisibility: function(v)
+	showSidePanel: function(v)
 	{
-		var coding_area = this.global_context.code_container;
-		if(!coding_area) 
+		InterfaceModule.setSidePanelVisibility(v);
+		this.show_panel = InterfaceModule.side_panel_visibility;
+
+	},
+
+	onKeyDown: function(e)
+	{
+		//this key event must be redirected when the 3D area is selected
+		if( this._block_event )
 			return;
-		coding_area.style.display = v ? "block" : "none";
+		this._block_event = true;
+		var coding = this.coding_tabs_widget.root.querySelector(".CodeMirror");
+		if(coding)
+			coding.dispatchEvent( new e.constructor( e.type, e ) );
+		this._block_event = false;
 	},
 
 	onUnload: function()
@@ -698,277 +334,138 @@ var CodingModule = //do not change
 			this.external_window.close();
 	},
 
-	//creates the area containing the buttons and the codemirror
-	createCodingArea: function( container )
+	//get the current state
+	getState: function()
 	{
-		var context = {
-			root: container
-		};
+		return this.coding_tabs_widget.getState();
+	},
 
-		var coding_area = new LiteGUI.Area("codearea",{content_id:"", height: -30});
-		container.appendChild( coding_area.root );
-		coding_area.split("horizontal",["50%","calc(50% - 5px)"],true);
+	//get the current state
+	setState: function(o)
+	{
+		return this.coding_tabs_widget.setState(o);
+	},
 
-		context.area = coding_area;
+	onConsoleLog: function(a,b)
+	{
+		console._log.apply( console, arguments );
 
-		//CODING AREA *********************************
-
-		CodeMirror.commands.autocomplete = function(cm) {
-			var API = CodingModule._current_API;
-			if(!API)
-				CodeMirror.showHint(editor, CodeMirror.javascriptHint);
-			else
-				CodeMirror.showHint(cm, CodeMirror.hintAPI );
-		}
-
-		CodeMirror.hintAPI = function(editor, options)
+		var elem = document.createElement("div");
+		elem.className = "msg";
+		a = String(a);
+		if( a.indexOf("%c") != -1)
 		{
-			var Pos = CodeMirror.Pos;
-			function getToken(e, cur) {return e.getTokenAt(cur);}
-
-			var API = CodingModule._current_API;
-
-			var cur = editor.getCursor(), token = getToken(editor, cur), tprop = token;
-			var found = [], start = token.string;
-
-			for(var i in API)
-				if( i.indexOf( start ) == 0)
-					found.push( i );
-
-			return {
-				from: Pos(cur.line, token.start),
-				to: Pos(cur.line, token.end),
-				list: found 
-			};
+			a = a.split("%c").join("");
+			elem.setAttribute("style",b);
 		}
-
-		/*
-		CodeMirror.commands.insert_function = function(cm) {
-			//trace(cm);
-			cm.replaceRange("function() {}",cm.getCursor(),cm.getCursor());
-			var newpos = cm.getCursor();
-			newpos.ch -= 1; //set cursor inside
-			cm.setCursor(newpos);
-		}
-		*/
-
-		CodeMirror.commands.playstop_scene = function(cm) {
-			if(window.PlayModule)
-				PlayModule.onPlay();
-		}		
-
-		CodeMirror.commands.compile = function(cm) {
-			CodingModule.evalueCode();
-			Scene.refresh();
-		}
-
-		//top bar
-		var top_widget = context.top_widget = new LiteGUI.Inspector("coding-top-widgets", { one_line: true });
-		/*this.top_widget.addButton(null,"Create", { callback: null });*/
-		//this.top_widget.addButton(null,"Evaluate", { callback: function() { CodingModule.evalueCode(); }});
-
-		//check for parsing errors
-		top_widget.addButton(null,"Compile",{ callback: function(v) { 
-			//console.log(CodingModule.area);
-			CodingModule.evalueCode();
-			Scene.refresh();
-		}}).title = "(Ctrl+Enter)";
-
-		top_widget.addButton(null,"Breakpoint",{ callback: function(v) { 
-			//console.log(CodingModule.area);
-			CodingModule.addBreakPoint();
-		}});
-
-		top_widget.addButton(null,"New Script",{ callback: function(v) { 
-			CodingModule.onNewScript();
-		}});
-
-		top_widget.addButton(null,"Open All",{ callback: function(v) { 
-			CodingModule.onOpenAllScripts();
-		}});
-
-		top_widget.addButton(null,"Help",{ callback: function(v) { 
-			CodingModule.onShowHelp();
-		}});
-
-		//this.top_widget.addSeparator();
-
-		top_widget.addButton(null,"Detach",{ width: 80, callback: function(v) { 
-			//console.log(CodingModule.area);
-			setTimeout( function() { CodingModule.detachWindow(); },500 );
-		}});
-
-		/*
-		top_widget.addButton(null,"New",{ width: 50, callback: function(v) { 
-			CodingModule.createCodingWindow();
-		}});
-		*/
-
-		top_widget.addButton(null,"-",{ width: 40, callback: function(v) { 
-			CodingModule.changeFontSize(-1);
-		}});
-		top_widget.addButton(null,"+",{ width: 40, callback: function(v) { 
-			CodingModule.changeFontSize(+1);
-		}});
-
-		top_widget.addButton(null,"3D",{ width: 40, callback: function(v) { 
-			CodingModule.show3DWindow(!CodingModule.sceneview_visible);
-		}});
-
-		/*
-		this.top_widget.addString("Search","",{ callback: function(v) { 
-			//TODO
-		}});
-		*/
-		//this.top_widget.addButton(null,"Close Editor", { callback: function() { CodingModule.closeTab(); }});
-		//this.top_widget.addButton(null,"Execute", { callback: null });
-
-		var coding_workarea_root = coding_area.sections[0];
-
-		var coding_workarea = context.workarea = new LiteGUI.Area("coding-workarea");
-		coding_workarea.add( top_widget );
-		coding_workarea_root.add( coding_workarea );
-
-		//TODO: this could be improved to use LiteGUI instead
-		$(coding_workarea.content).append("<div class='code-container' style='height: calc(100% - 54px); height: -moz-calc(100% - 54px); height: -webkit-calc(100% - 54px); overflow: auto'></div><div id='code-footer' style='height:18px; padding: 4px 0 0 4px; background-color: #222;'></div>");
-		var code_container = context.code_container = coding_workarea.query(".code-container");
-
-		var editor = CodeMirror(code_container, {
-			value: "",
-			mode:  "javascript",
-			theme: "blackboard",
-			lineWrapping: this.wrap_lines,
-			gutter: true,
-			tabSize: 2,
-			lineNumbers: true,
-			matchBrackets: true,
-			styleActiveLine: true,
-			extraKeys: {
-				"Ctrl-Enter": "compile",
-				"Ctrl-Space": "autocomplete",
-				"Cmd-Space": "autocomplete",
-				//"Ctrl-F": "insert_function",
-				"Cmd-F": "insert_function",
-				"Ctrl-P": "playstop_scene",
-				},
-			onCursorActivity: function(e) {
-				CodingModule.editor.matchHighlight("CodeMirror-matchhighlight");
-			}
-		  });
-
-		  editor.on("change", CodingModule.onCodeChange.bind(CodingModule) );
-
-		 context.editor = editor;
-		 return context;
+		elem.innerText = a;
+		this.console_container.appendChild( elem );
+		this.console_container.scrollTop = 1000000;
+		if( this.console_container.childNodes.length > 500 )
+			this.console_container.removeChild( this.console_container.childNodes[0] );
 	}
 };
 
-LiteGUI.registerModule( CodingModule );
+CORE.registerModule( CodingModule );
 
+/* editors **************************************/
 
-
-function getCompletions(token, context) {
-  var found = [], start = token.string;
-  function maybeAdd(str) {
-    if (str.indexOf(start) == 0) found.push(str);
-  }
-  function gatherCompletions(obj) {
-    if (typeof obj == "string") forEach(stringProps, maybeAdd);
-    else if (obj instanceof Array) forEach(arrayProps, maybeAdd);
-    else if (obj instanceof Function) forEach(funcProps, maybeAdd);
-    for (var name in obj) maybeAdd(name);
-  }
-
-  if (context) {
-    // If this is a property, see if it belongs to some object we can
-    // find in the current environment.
-    var obj = context.pop(), base;
-    if (obj.className == "js-variable")
-      base = window[obj.string];
-    else if (obj.className == "js-string")
-      base = "";
-    else if (obj.className == "js-atom")
-      base = 1;
-    while (base != null && context.length)
-      base = base[context.pop().string];
-    if (base != null) gatherCompletions(base);
-  }
-  else {
-    // If not, just look in the window object and any local scope
-    // (reading into JS mode internals to get at the local variables)
-    for (var v = token.state.localVars; v; v = v.next) maybeAdd(v.name);
-    gatherCompletions(window);
-    forEach(keywords, maybeAdd);
-  }
-  return found;
+LS.Components.Script.prototype.getExtraTitleCode = LS.Components.ScriptFromFile.prototype.getExtraTitleCode = function()
+{
+	return "<span class='icon script-context-icon'><img src='" + EditorModule.icons_path + LS.Script.icon + "'/></span>";
 }
 
-/*
-LiteWidgets.prototype.addScript = function(name,value, options)
+LS.Components.Script["@inspector"] = function( component, inspector )
 {
-	options = options || {};
-	value = value || "";
-	var that = this;
-	this.values[name] = value;
+	var context_locator = component.getLocator() + "/context";
+	var context = component.getContext();
 
-	var element = this.createWidget(null,"<p>"+name+"</p><span class='inputfield textarea disabled'><textarea tabIndex='"+this.tab_index+"' "+(options.disabled?"disabled":"")+">"+value+"</textarea></span><p><button>Edit Code</button></p>", options);
-	this.tab_index++;
-
-	$(element).find(".wcontent textarea").bind( options.inmediate ? "keyup" : "change", function(e) { 
-		LiteWidgets.onWidgetChange.call(that,element,name,e.target.value, options);
+	var icon = this.current_section.querySelector(".script-context-icon");
+	icon.addEventListener("dragstart", function(event) { 
+		event.dataTransfer.setData("uid", context_locator );
+		event.dataTransfer.setData("locator", context_locator );
+		event.dataTransfer.setData("type", "object");
+		event.dataTransfer.setData("node_uid", component.root.uid);
+		if( component.setDragData )
+			component.setDragData( event );
 	});
 
-	$(element).find("textarea").css({height: options.height || 150 });
+	inspector.addButton(null,"Edit Code", { callback: function() {
+		CodingModule.openTab();
+		var path = component.uid;
+		CodingModule.editInstanceCode( component );
+	}});
 
-	$(element).find("button").click(function() {
-		//TODO
-	});
-
-	this.append(element);
-
-	element.setValue = function(v) { $(this).find("textarea").val(v).change(); };
-	return $(element);
+	if(context)
+	{
+		if(context.onInspector)
+			context.onInspector( inspector );
+		else
+			this.showObjectFields( context, inspector );
+	}
 }
-LiteWidgets.widget_constructors["script"] = "addScript";
-*/
 
-
-LS.Components.Script["@inspector"] = function(component, attributes)
+LS.Components.ScriptFromFile["@inspector"] = function( component, inspector )
 {
-	attributes.addString("Name", component.name, { callback: function(v) { component.name = v; CodingModule.onScriptRenamed( component ); }});
+	inspector.widgets_per_row = 2;
+	inspector.addResource( "Filename", component.filename, { width: "75%", category: "Script", align:"right", callback: function(v) { 
+		component.filename = v;
+	}});
+
+	inspector.addButton(null,"Edit Code", { width: "25%", callback: function() {
+		var path = component.uid;
+		if(!component.filename)
+		{
+			/*
+			LiteGUI.prompt("Choose a filename", function(filename){
+				if(!filename)
+					return;
+				CodingModule.openTab();
+				var res = new LS.Resource();
+				var extension = LS.RM.getExtension(filename);
+				if(extension != "js")
+					filename = filename + ".js";
+				component.filename = filename;
+				LS.RM.registerResource(filename,res);
+				CodingModule.editInstanceCode( res );
+			});
+			*/
+			DriveModule.showCreateScriptDialog({filename: "script.js"}, function(resource){
+				if(!resource)
+					return;
+				CodingModule.openTab();
+				var fullpath = resource.fullpath || resource.filename;
+				component.filename = fullpath;
+				CodingModule.editInstanceCode( resource );
+			});
+			return;
+		}
+
+		CodingModule.openTab();
+		var res = LS.ResourcesManager.load( component.filename, null, function(res){
+			CodingModule.editInstanceCode( res );
+		});
+	}});
+	inspector.widgets_per_row = 1;
 
 	var context = component.getContext();
 	if(context)
 	{
-		attributes.addTitle("Variables");
-		this.showContainerFields(context, attributes);
-
-		var actions = [];
-		/*
-		for(var i in context)
-		{
-			if( typeof(context[i]) != "function" || LS.Components.Script.exported_callbacks.indexOf(i) != -1 || i == "getResources" )
-				continue;
-			attributes.addButton(null,i, { callback: context[i].bind(context) });
-		}
-		*/
+		if(context.onInspector)
+			context.onInspector( inspector );
+		else
+			this.showObjectFields(context, inspector );
 	}
-
-	//attributes.addString("Module name", component.component_name, { callback: function(v) { component.component_name = v; } });
-	//attributes.addTextarea(null, component.code, { disabled: true, height: 100 });
-	attributes.addButton(null,"Edit Code", { callback: function() {
-		CodingModule.openTab();
-		var path = component.uid;
-		CodingModule.editInstanceCode(component, { id: component.uid, title: component._root.id, lang: "javascript", path: path, help: LS.Components.Script.coding_help } );
-	}});
-	//attributes.addCheckbox("Register", component.register_component, { callback: function(v) { component.register_component = v; } });
 }
 
-LS.Components.Script.onComponentInfo = function( component, widgets )
+LS.Components.Script.prototype.onComponentInfo = function( widgets )
 {
-	widgets.addString("Context Locator", component.getLocator() + "/context", { disabled: true } );
+	var component = this;
+
+	var locator_widget = widgets.addString("Context Locator", this.getLocator() + "/context", { disabled: true } );
+
 	var values = [""];
-	var context = component.getContext();
+	var context = this.getContext();
 	if(context)
 	{
 		for(var i in context)
@@ -979,6 +476,136 @@ LS.Components.Script.onComponentInfo = function( component, widgets )
 			values.push(i);
 		}
 		widgets.addCombo("Functions", "", { values: values, callback: function(v){ 
+			//TODO
 		}});
 	}
 }
+
+//to write a tiny code snippet
+LiteGUI.Inspector.prototype.addCode = function( name, value, options )
+{
+	options = options || {};
+	value = value || "";
+	var that = this;
+	this.values[ name ] = value;
+
+	var element = null;
+
+	var instance = options.instance || {};
+	var uid = instance.uid || ("code_" + this.tab_index);
+	var instance_settings = { 
+		id: uid,
+		path: instance.uid,
+		title: uid
+	};
+	//getCode: function(){ return instance[name];},
+	//setCode: function(v){ instance[name] = v;}
+
+	if(!options.allow_inline)
+	{
+		var text = "Edit Code";
+		element = this.createWidget(name,"<button class='single' tabIndex='"+ this.tab_index + "'>"+text+"</button>", options);
+		var button = element.querySelector("button");
+		button.addEventListener("click", function() {
+			CodingModule.openTab();
+			CodingModule.editInstanceCode( instance, instance_settings );
+		});
+	}
+	else
+	{
+		element = inspector.addContainer( null, { height: 300} );
+
+		var codepad = new CodingPadWidget();
+		element.appendChild( codepad.root );
+		codepad.editInstanceCode( instance, instance_settings );
+		codepad.top_widgets.addButton(null,"In Editor",{ callback: function() { 
+			if(options.callback_button)
+				options.callback_button();
+			inspector.refresh();
+			CodingModule.openTab();
+			CodingModule.editInstanceCode( instance, instance_settings );
+		}});
+	}
+
+	this.tab_index += 1;
+	this.append( element );
+	return element;
+}
+
+LiteGUI.Inspector.widget_constructors["code"] = "addCode";
+
+
+LS.Components.Script.actions["breakpoint_on_call"] = { 
+	title: "Breakpoint on call", 
+	callback: function() { 
+		if(!this._root)
+		{
+			console.warn("Script is not attached to a node?");
+			return;
+		}
+		this._breakpoint_on_call = true;
+	}
+};
+
+
+
+LS.Components.Script.actions["convert_to_script"] = { 
+	title: "Convert to ScriptFromFile", 
+	callback: function() { 
+		if(!this._root)
+		{
+			console.warn("Script is not attached to a node?");
+			return;
+		}
+
+		var node = this._root;
+		var info = this.serialize();
+		var code = this.getCode();
+		delete info.code;
+		var compo = this;
+
+		LiteGUI.prompt("Choose a filename for the source file", function(v){
+
+			var resource = new LS.Resource();
+			resource.setData( code );
+			LS.RM.registerResource( v, resource );
+			info.filename = resource.filename;
+
+			var index = node.getIndexOfComponent(compo);
+			node.removeComponent(compo);
+
+			var script = new LS.Components.ScriptFromFile();
+			node.addComponent(script, index);
+			script.configure(info);
+			EditorModule.refreshAttributes();
+
+			console.log("Script converted to ScriptFromFile");
+		},{ value:"unnamed_code.js" });
+	}
+};
+
+LS.Components.ScriptFromFile.actions = {}; //do not share with script
+LS.Components.ScriptFromFile.actions["convert_to_script"] = { 
+	title: "Convert to Script", 
+	callback: function() { 
+		if(!this._root)
+		{
+			console.warn("Script is not attached to a node?");
+			return;
+		}
+
+		var node = this._root;
+		var info = this.serialize();
+		delete info.filename;
+		info.code = this.getCode();
+		var script = new LS.Components.Script();
+		var index = node.getIndexOfComponent(this);
+		node.removeComponent(this);
+		node.addComponent(script, index);
+		script.configure(info);
+		EditorModule.refreshAttributes();
+		console.log("ScriptFromFile converted to Script");
+	}
+};
+
+LS.Components.ScriptFromFile.actions["breakpoint_on_call"] = LS.Components.Script.actions["breakpoint_on_call"];

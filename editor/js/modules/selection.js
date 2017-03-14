@@ -33,7 +33,7 @@ var SelectionModule = {
 			if(!skip_events)
 			{
 				LEvent.trigger( LS.GlobalScene, "selected_node_changed");
-				EditorModule.inspectNode( null );
+				EditorModule.inspect( null );
 			}
 
 			RenderModule.requestFrame();
@@ -45,14 +45,14 @@ var SelectionModule = {
 
 		//same selection
 		if(this.selection && this.selection.uid && this.selection.uid == selection.uid )
-			return;
+			return false;
 
 		//remove selection
 		clear_selection();
 
 		//store
 		this.selection = selection;
-		this.selection_array = [selection];
+		this.selection_array = [ selection ];
 
 		var scene = LS.GlobalScene;
 
@@ -66,7 +66,7 @@ var SelectionModule = {
 		if(!skip_events)
 		{
 			LEvent.trigger( scene, "selected_node_changed", selection.node);
-			EditorModule.inspectNode( selection.node );
+			EditorModule.inspect( selection.node );
 		}
 
 		//repaint
@@ -81,6 +81,12 @@ var SelectionModule = {
 					node._is_selected = false;
 			}
 		}
+
+		if(!LS.GlobalScene.extra.editor)
+			LS.GlobalScene.extra.editor = {};
+		LS.GlobalScene.extra.editor.selected_node = scene.selected_node ? scene.selected_node.uid : null;
+
+		return true;
 	},
 
 	setMultipleSelection: function( selection, skip_events )
@@ -91,9 +97,9 @@ var SelectionModule = {
 		for(var i = 0; i < selection.length; i++)
 		{
 			if(i == 0)
-				this.setSelection(selection[i], skip_events)
+				this.setSelection( selection[i], skip_events )
 			else
-				this.addToSelection(selection[i], skip_events)
+				this.addToSelection( selection[i], skip_events )
 		}
 	},
 
@@ -131,20 +137,23 @@ var SelectionModule = {
 			var selection = this.selection_array[i];
 			if(selection.instance == instance )
 			{
-				selection.splice(i,1);
+				this.selection_array.splice(i,1);
 				if(selection.node)
 					selection.node._is_selected = false;
 
+
+				if(selection == this.selection)
+				{
+					this.selection = this.selection_array[0];
+					EditorModule.inspect( null );
+				}
+
 				if(!skip_events)
 				{
-					this.selected = this.selection_array[0];
 					if(i == 0)
-					{
-						LEvent.trigger( LS.GlobalScene, "selected_node_changed", this.selection.node);
-						EditorModule.inspectNode( this.selection.node );
-					}
+						LEvent.trigger( LS.GlobalScene, "selected_node_changed", this.selection ? this.selection.node : null );
 					else
-						LEvent.trigger( LS.GlobalScene, "other_node_deselected", this.selection.node);
+						LEvent.trigger( LS.GlobalScene, "other_node_deselected", this.selection ? this.selection.node : null );
 				}
 				return;			
 			}
@@ -160,9 +169,9 @@ var SelectionModule = {
 		var instance = selection.instance;
 
 		//selecting a generic scene node
-		if(instance.constructor === SceneNode)
+		if(instance.constructor === LS.SceneNode)
 			selection.node = instance;
-		else if(instance._root && instance._root.constructor === SceneNode) //it is a component
+		else if(instance._root && instance._root.constructor === LS.SceneNode) //it is a component
 			selection.node = instance._root;
 
 		//if no unique id is received, just try to create one
@@ -301,7 +310,7 @@ var SelectionModule = {
 		}
 	},
 
-	applyTransformMatrixToSelection: function( matrix, center, node, selection_array)
+	applyTransformMatrixToSelection: function( matrix, center, node, selection_array )
 	{
 		selection_array = selection_array || this.selection_array;
 		if(!selection_array || selection_array.length == 0)
@@ -344,7 +353,17 @@ var SelectionModule = {
 		return this.selection.node;
 	},
 
+	//return all the nodes selected
 	getSelectedNodes: function()
+	{
+		var nodes = [];
+		for(var i = 0; i < this.selection_array.length; ++i)
+			if( this.selection_array[i].node )
+				nodes.push( this.selection_array[i].node );
+		return nodes;
+	},
+
+	getSelectedNodesInfo: function()
 	{
 		return this.selection_array;
 	},
@@ -396,20 +415,24 @@ var SelectionModule = {
 			var scene = LS.GlobalScene;
 
 			//root component
-			if(selection.instance && selection.node == LS.GlobalScene.root) 
+			if(selection.instance && selection.instance.constructor.is_component && selection.node == LS.GlobalScene.root) 
 			{
 				var component = selection.instance;
-				var data = component.serialize();
-				var new_component = new window[ LS.getObjectClassName(component) ]();
-				new_component.configure( data );
+				new_component = component.clone();
 				selection.node.addComponent( new_component );
 
-				LiteGUI.addUndoStep({ 
+				UndoModule.addUndoStep({ 
 					data: { compo_uid: new_component._uid },
-					callback: function(d) {
+					callback_undo: function(d) {
 						var compo = scene.root.getComponentByUid( d.compo_uid );
-						if(compo)
-							scene.root.removeComponent(compo);
+						if(!compo)
+							return;
+						d.old_compo = compo;
+						scene.root.removeComponent(compo);
+					},
+					callback_redo: function(d) {
+						var compo = d.old_compo;
+						scene.root.addComponent(compo);
 					}
 				});
 
@@ -424,17 +447,33 @@ var SelectionModule = {
 			for(var i in result)
 				created_uids.push( result[i].uid );
 			//DELETE NODES
-			LiteGUI.addUndoStep({ 
+			UndoModule.addUndoStep({ 
+				title: "Cloned " + (created_uids.length > 1 ? "nodes" : "node"),
 				data: { uids: created_uids, old_selection: old_selection },
-				callback: function(d) {
+				callback_undo: function(d) {
+					d.removed = [];
 					for(var i in d.uids)
 					{
 						var uid = d.uids[i];
 						var node = LS.GlobalScene.getNodeByUId(uid);
 						if(node)
+						{
+							d.removed.push([ node.parentNode.uid, node ]);
 							node.destroy();
+						}
 					}
 					SelectionModule.setSelectionFromUIds( d.old_selection );
+				},
+				callback_redo: function(d)
+				{
+					for(var i in d.removed)
+					{
+						var n = d.removed[i];
+						var node = LS.GlobalScene.getNode(n[0]);
+						if(node)
+							node.addChild( n[1] );
+					}
+					d.removed = null;
 				}
 			});
 		}
@@ -442,47 +481,126 @@ var SelectionModule = {
 		return result;
 	},
 
-	removeSelectedInstance: function()
+	removeSelectedInstances: function()
 	{
 		if(!this.selection_array || this.selection_array.length == 0)
 			return;
 
-		for(var i = 0; i < this.selection_array.length; i++)
+		var data_removed = [];
+		var selection_array = this.selection_array.concat(); //clone because it will be modifyed when removing objects
+
+		for(var i = 0; i < selection_array.length; i++)
 		{
-			var selection = this.selection_array[i];
+			var selection = selection_array[i];
 
 			var node = selection.node;
-			var parent = node ? node.parentNode : null;
-
-			if( selection.instance.constructor === SceneNode && !selection.instance._is_root )
+			if(!node || !node.parentNode)
+				continue;
+	
+			//remove node
+			if( selection.instance.constructor === LS.SceneNode && !selection.instance._is_root )
 			{
-				//DELETE NODE
-				LiteGUI.addUndoStep({ 
-					data: { node: node, parent: parent, index: parent.childNodes.indexOf(node) },
-					callback: function(d) {
-						d.parent.addChild( d.node, d.index );
-						SelectionModule.setSelection(d.node);
-					}
-				});
-
-				parent.removeChild(node);
-			}
-			else if( selection.instance._root && selection.instance._root.constructor === SceneNode )
+				data_removed.push( { parent_uid: node.parentNode.uid, index: node.parentNode.childNodes.indexOf( node ), node_data: node.serialize() } );
+				node.parentNode.removeChild(node);
+			} //removed component
+			else if( selection.instance._root && selection.instance._root.constructor === LS.SceneNode )
 			{
-				//DELETE COMPONENT
-				LiteGUI.addUndoStep({ 
-					data: { comp: selection.instance, node: node },
-					callback: function(d) {
-						d.node.addComponent( d.comp );
-						SelectionModule.setSelection(d.node);
-					}
-				});
-
+				data_removed.push( { node_uid: node.uid, comp_class: LS.getObjectClassName( selection.instance ), comp: selection.instance.serialize() } );
 				node.removeComponent( selection.instance );
 			}
 		}
 
-		EditorModule.inspectNode();
+		if(!data_removed.length)
+			return;
+
+		//Create UNDO STEP 
+		UndoModule.addUndoStep({ 
+			title: "Nodes or Components deleted",
+			data: { data: data_removed },
+			callback: function(d) {
+				var nodes = [];
+				for(var i = 0; i < d.data.length; ++i)
+				{
+					var data = d.data[i];
+					if(data.comp)
+					{
+						var node = LS.GlobalScene.getNode( data.node_uid );
+						if(!node)
+							continue;
+						nodes.push(node);
+						var comp_class = LS.Components[ data.comp_class ];
+						if(comp_class)
+						{
+							var new_comp = new comp_class( d.comp );
+							node.addComponent( new_comp );
+						}
+					}
+					else
+					{
+						var parent = LS.GlobalScene.getNode( data.parent_uid );
+						if(!parent)
+							continue;
+						var new_node = new LS.SceneNode();
+						new_node.configure( data.node_data );
+						parent.addChild( new_node, data.index );
+						nodes.push(new_node);
+					}
+				}
+				SelectionModule.setSelection(nodes);
+			}
+		});
+
+		EditorModule.inspect();
 		SelectionModule.setSelection(null);
+	},
+
+	selectParentNode: function()
+	{
+		var node = this.getSelectedNode();
+		if(!node)
+			return;
+		var selected = node.parentNode;
+		if(selected)
+			this.setSelection( selected );
+	},
+
+	selectChildNode: function()
+	{
+		var node = this.getSelectedNode();
+		if(!node)
+			return;
+		var selected = node.childNodes[0] ;
+		if(selected)
+			this.setSelection( selected );
+	},
+
+	selectSiblingNode: function( previous )
+	{
+		var node = this.getSelectedNode();
+		if(!node)
+			return;
+		var parent = node.parentNode;
+		if(!parent)
+			return;
+
+		var children = parent._children;
+		if( !children || !children.length )
+			return;
+		var index = children.indexOf( node );
+		if(previous)
+		{
+			if(index == -1)
+				return;
+			index -= 1;
+			if(index < 0)
+				index = children.length - 1;
+		}
+		else
+			index += 1;
+		var selected = children[ index % children.length ];
+		if(selected)
+			this.setSelection( selected );
 	}
 };
+
+CORE.registerModule( SelectionModule );

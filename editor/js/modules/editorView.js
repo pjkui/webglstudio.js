@@ -13,39 +13,29 @@ var EditorView = {
 		render_all_components: false, //render gizmos even for non selected components
 		grid_scale: 1.0,
 		grid_alpha: 0.5,
+		grid_plane: "xz",
 		render_null_nodes: true,
 		render_aabb: false,
 		render_tree: false,
 		render_skeletons: true,
-		render_names: false
+		render_names: false,
+		render_height: true
 	},
 
 	render_debug_info: true,
 	render_gizmos: true,
 	render_helpers: true, //icons, grid, cones, etc
-	textures_display: [],
-
-	debug_points: [], //used for debugging, allows to draw points easily
-
-	colors: {
-		selected: vec4.fromValues(1,1,1,1),
-		node: vec4.fromValues(1,0.5,0,1),
-		bone: vec4.fromValues(1,0,0.5,1)
-	},
 
 	init: function()
 	{
-		if(!gl) return;
+		if(!gl)
+			return;
 
-		//LEvent.jQuery = true;
+		this.debug_render = new LS.DebugRender(); //in charge of rendering debug info in the scene
+		RenderModule.canvas_manager.addWidget(this);
 
-		//LEvent.bind(Scene, "afterRenderScene", function() { EditorModule.renderEditor(); });
-
-		this.createMeshes();
-		RenderModule.viewport3d.addModule(this);
-
-		LEvent.bind( LS.GlobalScene, "afterRenderScene", this.renderView.bind(this));
-		LEvent.bind( LS.GlobalScene, "renderPicking", this.renderPicking.bind(this));
+		LEvent.bind( LS.Renderer, "renderHelpers", this.renderView.bind(this));
+		LEvent.bind( LS.Renderer, "renderPicking", this.renderPicking.bind(this));
 	},
 
 	onShowSettingsPanel: function(name,widgets)
@@ -80,7 +70,7 @@ var EditorView = {
 				var camera = cameras[i];
 				camera.getLocalViewport( null, viewport );
 				gl.strokeColor = (camera == ToolsModule.selected_camera ? [1,1,1] : [0.5,0.5,0.5]);
-				gl.strokeRect(viewport[0],gl.canvas.height - viewport[3] - viewport[1],viewport[2],viewport[3]);
+				gl.strokeRect( viewport[0],gl.canvas.height - viewport[3] - viewport[1],viewport[2],viewport[3] );
 			}
 			gl.finish2D();
 		}
@@ -93,42 +83,46 @@ var EditorView = {
 	//renders the gizmos that belong to world space
 	renderView: function(e, camera)
 	{
+		if(LS.Renderer._current_scene != LS.GlobalScene)
+			return;
+
 		if(this.mustRenderHelpers())
 			this.renderEditor( camera );
-
-		//if(!this.enabled) return;
 	},
 
 	mustRenderGizmos: function()
 	{
-		//if(RenderModule.frame_updated && this.render_debug_info && !RenderModule.render_options.ingame && (!Renderer.color_rendertarget || !Renderer.render_fx) )
+		//if(RenderModule.frame_updated && this.render_debug_info && !RenderModule.render_settings.ingame && (!Renderer.color_rendertarget || !Renderer.render_fx) )
 		//	return true;
 
-		if(this.render_gizmos && !RenderModule.render_options.in_player && RenderModule.frame_updated)
+		if(this.render_gizmos && !RenderModule.render_settings.in_player && RenderModule.frame_updated)
 			return true;
 		return false;
 	},	
 
 	mustRenderHelpers: function()
 	{
-		if(this.render_helpers && !RenderModule.render_options.in_player && RenderModule.frame_updated)
+		if(this.render_helpers && !RenderModule.render_settings.in_player && RenderModule.frame_updated)
 			return true;
 		return false;
-	},	
+	},
 
 	sendToGizmos: function(name, params)
 	{
 		for(var i = 0; i < RenderModule.cameras.length; i++)
 		{
 			var camera = RenderModule.cameras[i];
-			if(!camera.gizmos || !camera.gizmos.length )
+			if(!camera._gizmos || !camera._gizmos.length )
 				continue;
 
-			for(var j = 0; j < camera.gizmos.length; j++)
+			for(var j = 0; j < camera._gizmos.length; j++)
 			{
-				var gizmo = camera.gizmos[j];
+				var gizmo = camera._gizmos[j];
+				var r = null;
 				if(gizmo[name])
-					gizmo[name].apply(gizmo, params);
+					r = gizmo[name].apply(gizmo, params);
+				if(r === true)
+					return true; //break
 			}
 		}
 	},
@@ -140,337 +134,57 @@ var EditorView = {
 
 	mousedown: function(e)
 	{
-		this.sendToGizmos("mousedown",[e]);
+		var r = this.sendToGizmos("mousedown",[e]);
+
+		return r;
 	},
 
 	mousemove: function(e)
 	{
-		this.sendToGizmos("mousemove",[e]);
+		var r = this.sendToGizmos("mousemove",[e]);
+
+		return r;
 	},
 
 	mouseup: function(e)
 	{
-		this.sendToGizmos("mouseup",[e]);
+		var r = this.sendToGizmos("mouseup",[e]);
+		if(r)
+			return r;
+
+		if(e.button == 2 && e.click_time < 200)
+		{
+			var instance_info = LS.Picking.getInstanceAtCanvasPosition( e.canvasx, e.canvasy, ToolUtils.getCamera() );
+			var instance = instance_info;
+			if(instance_info && instance_info.instance)
+				instance = instance_info.instance;
+			this._canvas_event = e; //we store the event because we may need it
+			EditorModule.showCanvasContextMenu( instance, e );
+			return true;
+		}
 	},
 
 	mousewheel: function(e)
 	{
-		this.sendToGizmos("mousewheel",[e]);
-	},
-
-	_points: [], //linear array with x,y,z, x,y,z, ...
-	_points_color: [],
-	_points_nodepth: [], //linear array with x,y,z, x,y,z, ...
-	_points_color_nodepth: [],
-	_lines: [], //vec3,vec3 array
-	_lines_color: [], //
-	_names: [], //array of [vec3, string]
-
-	//this primitives are rendered after all the components editors are rendered
-	renderPoint: function( p, ignore_depth, c )
-	{
-		c = c || [1,1,1,1];
-		if(ignore_depth)
-		{
-			this._points_nodepth.push( p[0], p[1], p[2] );
-			this._points_color_nodepth.push( c[0], c[1], c[2], c[3] );
-		}
-		else
-		{
-			this._points.push( p[0], p[1], p[2] );
-			this._points_color.push( c[0], c[1], c[2], c[3] );
-		}
-	},
-
-	renderLine: function( start, end, color )
-	{
-		color = color || [1,1,1,1];
-		this._lines.push( start, end );
-		this._lines_color.push( color, color );
-	},
-
-	renderText: function( position, text, color )
-	{
-		color = color || [1,1,1,1];
-		this._names.push([text,position, color]);
+		return this.sendToGizmos("mousewheel",[e]);
 	},
 
 	renderEditor: function( camera )
 	{
-		var shader = RenderModule.viewport3d.flat_shader;
-		var viewport3d = RenderModule.viewport3d;
-		//gl.viewport( Renderer._full_viewport[0], Renderer._full_viewport[1], Renderer._full_viewport[2], Renderer._full_viewport[3] );
+		for(var i in this.settings)
+			this.debug_render.settings[i] = this.settings[i];
 
-		gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
-		gl.enable( gl.DEPTH_TEST );
-		gl.disable(gl.BLEND);
-		gl.disable( gl.CULL_FACE );
-		//gl.depthFunc( gl.LEQUAL );
-		//gl.depthMask( false );
+		this.debug_render.render( camera, SelectionModule.isSelected.bind( SelectionModule ) );
 
-		//var camera = RenderModule.camera;
-		//Draw.setCamera(camera); //should be already set
-		//Draw.setCameraPosition(camera.getEye());
-		//Draw.setViewProjectionMatrix(Renderer._view_matrix, Renderer._projection_matrix, Renderer._viewprojection_matrix);
-
-		if(EditorView.settings.render_grid)
-		{
-			gl.enable(gl.BLEND);
-			Draw.setColor([0.3,0.3,0.3, this.settings.grid_alpha ]);
-			Draw.push();
-			Draw.scale( this.settings.grid_scale, this.settings.grid_scale, this.settings.grid_scale );
-			Draw.renderMesh( this.grid_mesh );
-			//Draw.renderGrid(20,12);
-			Draw.setColor([0.2,0.2,0.2, this.settings.grid_alpha * 0.75]);
-			Draw.scale(10,10,10);
-			Draw.renderMesh( this.grid_mesh );
-			Draw.pop();
-			//Draw.renderGrid(80,20);
-
-			Draw.setColor([0.2,0.2,0.2,1.0]);
-			Draw.push();
-			Draw.scale(0.01,0.01,0.01);
-			Draw.renderText("Origin");
-			Draw.pop();
-		}
-
-		if(EditorView.settings.render_component)
-		{
-			var selected_node = SelectionModule.getSelectedNode();
-
-			//Node components
-			for(var i = 0, l = LS.GlobalScene._nodes.length; i < l; ++i)
-			{
-				var node = LS.GlobalScene._nodes[i];
-				var is_selected = node._is_selected; //SelectionModule.isSelected( node );
-				if(node.renderEditor)
-					node.renderEditor( is_selected );
-				for(var j = 0, l2 = node._components.length; j < l2; ++j)
-				{
-					var component = node._components[j];
-					var is_component_selected = SelectionModule.isSelected( component );
-					if(component.renderEditor)
-						component.renderEditor( node == selected_node, is_component_selected );
-				}
-			}
-		}
-
-		//render local things		
-		var zero = vec3.create();
-		for(var i = 0, l = LS.GlobalScene._nodes.length; i < l; ++i)
-		{
-			var node = LS.GlobalScene._nodes[i];
-			if(!node.transform) 
-				continue;
-
-			var global = node.transform.getGlobalMatrixRef();
-			var pos = mat4.multiplyVec3( vec3.create(), global, zero ); //create a new one to store them
-
-			if( this.settings.render_null_nodes )
-			{
-				if( node._is_selected )
-					this.renderPoint( pos, true, this.colors.selected );
-				else if( node._is_bone )
-					this.renderPoint( pos, true, this.colors.bone );
-				else
-					this.renderPoint( pos, false, this.colors.node );
-			}
-
-			if(EditorView.settings.render_names)
-				this.renderText(pos, node.name, node._is_selected ? [0.94, 0.8, 0.4,1] : [0.8,0.8,0.8,0.9] );
-
-			if (node._parentNode && node._parentNode.transform && (EditorView.settings.render_tree || (EditorView.settings.render_skeletons && node._is_bone && node._parentNode._is_bone)) )
-			{
-				this.renderLine( pos , node._parentNode.transform.getGlobalPosition(), this.colors.bone );
-				//this.renderPoint( pos, true, this.colors.bone );
-			}
-
-			if(this.settings.render_axis)
-			{
-				Draw.push();
-				Draw.multMatrix(global);
-				Draw.setColor([1,1,1,1]);
-				Draw.renderMesh( EditorView.axis_mesh );
-				Draw.pop();
-			}
-		}
-
-		this.renderColliders();
-		this.renderPaths();
-
-		//Render primitives (points, lines, text) ***********************
-
-		if(this._points.length)
-		{
-			Draw.setPointSize(4);
-			Draw.setColor([1,1,1,1]);
-			Draw.renderPoints( this._points, this._points_color );
-			this._points.length = 0;
-			this._points_color.length = 0;
-		}
-
-		if(this._points_nodepth.length)
-		{
-			Draw.setPointSize(4);
-			Draw.setColor([1,1,1,1]);
-			gl.disable( gl.DEPTH_TEST );
-			Draw.renderPoints( this._points_nodepth, this._points_color_nodepth );
-			gl.enable( gl.DEPTH_TEST );
-			this._points_nodepth.length = 0;
-			this._points_color_nodepth.length = 0;
-		}
-
-
-		if(this._lines.length)
-		{
-			gl.disable( gl.DEPTH_TEST );
-			Draw.setColor([1,1,1,1]);
-			Draw.renderLines( this._lines, this._lines_color );
-			gl.enable( gl.DEPTH_TEST );
-			this._lines.length = 0;
-			this._lines_color.length = 0;
-		}
-
-		if(this.debug_points.length)
-		{
-			Draw.setPointSize(5);
-			Draw.setColor([1,0,1,1]);
-			Draw.renderPoints( this.debug_points );
-		}
-
-		if(EditorView.settings.render_names)
-		{
-			gl.disable( gl.DEPTH_TEST );
-			var camera2D = new LS.Camera({eye:[0,0,0],center:[0,0,-1]});
-			var viewport = gl.getViewport();
-			camera2D.setOrthographic(0,viewport[2], 0,viewport[3], -1,1);
-			camera2D.updateMatrices();
-			/*
-			Draw.pushCamera();
-			Draw.setCamera( camera2D );
-			Draw.setColor([0.8,0.9,1,1]);
-			*/
-
-			gl.start2D();
-			//gl.disable( gl.BLEND );
-			gl.font = "14px Arial";
-			var black_color = vec4.fromValues(0,0,0,0.5);
-
-			for(var i = 0; i < this._names.length; ++i)
-			{
-				var pos2D = camera.project( this._names[i][1] );
-				if(pos2D[2] < 0)
-					continue;
-				pos2D[2] = 0;
-
-				var text_size = gl.measureText( this._names[i][0] );
-				gl.fillColor = black_color;
-				gl.fillRect( Math.floor(pos2D[0] + 10), viewport[3] - (Math.floor(pos2D[1] + 8)), text_size.width, text_size.height );
-				gl.fillColor = this._names[i][2];
-				gl.fillText( this._names[i][0], Math.floor(pos2D[0] + 10), viewport[3] - (Math.floor(pos2D[1] - 4) ) );
-			}
-			gl.finish2D();
-
-
-			//Draw.popCamera();
-			this._names.length = 0;
-		}
-
-		//DEBUG
-		var selected_node = SelectionModule.getSelectedNode();
-		if(0 && selected_node && selected_node.transform) //render axis for all nodes
-		{
-			Draw.push();
-			var Q = selected_node.transform.getGlobalRotation();
-			var R = mat4.fromQuat( mat4.create(), Q );
-			Draw.setMatrix( R );
-			Draw.setColor([1,1,1,1]);
-			Draw.scale(10,10,10);
-			Draw.renderMesh( this.axis_mesh );
-			Draw.pop();
-		}
-
-		//render textures in manager, used for some debugging
-		this.renderTextures();
+		gl.depthFunc( gl.LEQUAL );
 
 		LEvent.trigger( LS.GlobalScene, "renderEditor" );
 
-
-		gl.viewport(0,0,gl.canvas.width,gl.canvas.height);
+		gl.depthFunc( gl.LESS );
+		gl.viewport(0,0,gl.canvas.width,gl.canvas.height); //??
 	},
 
-	renderPaths: function()
-	{
-		var scene = LS.GlobalScene;
-		if(!scene._paths)
-			return;
-
-		Draw.setColor([0.7,0.6,0.3,0.5]);
-
-		for(var i = 0; i < scene._paths.length; ++i)
-		{
-			var path = scene._paths[i];
-			var points = path.samplePoints(0);
-			Draw.renderLines( points, null, true );
-		}
-	},
-
-	renderColliders: function()
-	{
-		var scene = LS.GlobalScene;
-		if(!scene._colliders)
-			return;
-
-		Draw.setColor([0.33,0.71,0.71,0.5]);
-
-		for(var i = 0; i < scene._colliders.length; ++i)
-		{
-			var instance = scene._colliders[i];
-			var oobb = instance.oobb;
-
-			if(0) //render AABB
-			{
-				var aabb = instance.aabb;
-				Draw.push();
-				var center = BBox.getCenter(aabb);
-				var halfsize = BBox.getHalfsize(aabb);
-				Draw.translate(center);
-				//Draw.setColor([0.33,0.71,0.71,0.5]);
-				Draw.renderWireBox(halfsize[0]*2,halfsize[1]*2,halfsize[2]*2);
-				Draw.pop();
-			}			
-
-			Draw.push();
-			Draw.multMatrix( instance.matrix );
-			var halfsize = BBox.getHalfsize(oobb);
-
-			if(instance.type == PhysicsInstance.BOX)
-			{
-				Draw.translate( BBox.getCenter(oobb) );
-				Draw.renderWireBox( halfsize[0]*2, halfsize[1]*2, halfsize[2]*2 );
-			}
-			else if(instance.type == PhysicsInstance.SPHERE)
-			{
-				//Draw.scale(,halfsize[0],halfsize[0]);
-				Draw.translate( BBox.getCenter(oobb) );
-				Draw.renderWireSphere( halfsize[0], 20 );
-			}
-			else if(instance.type == PhysicsInstance.MESH)
-			{
-				var mesh = instance.mesh;
-				if(mesh)
-				{
-					if(!mesh.indexBuffers["wireframe"])
-						mesh.computeWireframe();
-					Draw.renderMesh(mesh, gl.LINES, null, "wireframe" );
-				}
-			}
-
-			Draw.pop();
-		}
-	},
-
-	//used for picking just points
+	//used for picking just points **************************************************
 	_picking_points: [], //used to collect all points to render during picking
 
 	addPickingPoint: function( position, size, info )
@@ -489,16 +203,20 @@ var EditorView = {
 		gl.disable( gl.BLEND );
 
 		var camera = RenderModule.camera;
-		Draw.setCamera(camera);
-		Draw.setPointSize( 20 );
+		LS.Draw.setCamera( camera );
+		LS.Draw.setPointSize( 20 );
 
-		var ray = camera.getRayInPixel( mouse_pos[0], mouse_pos[1] );
-		ray.end = vec3.add( vec3.create(), ray.start, vec3.scale(vec3.create(), ray.direction, 10000) );
+		var ray = null;
+		if(mouse_pos)
+		{
+			ray = camera.getRayInPixel( mouse_pos[0], mouse_pos[1] );
+			ray.end = vec3.add( vec3.create(), ray.origin, vec3.scale(vec3.create(), ray.direction, 10000 ) );
+		}
 
 		//Node components
-		for(var i = 0, l = Scene._nodes.length; i < l; ++i)
+		for(var i = 0, l = LS.GlobalScene._nodes.length; i < l; ++i)
 		{
-			var node = Scene._nodes[i];
+			var node = LS.GlobalScene._nodes[i];
 			if(node.renderPicking)
 				node.renderPicking(ray);
 
@@ -507,7 +225,7 @@ var EditorView = {
 				var pos = vec3.create();
 				mat4.multiplyVec3(pos, node.transform.getGlobalMatrixRef(), pos); //create a new one to store them
 				if( this.settings.render_null_nodes )
-					this.addPickingPoint( pos, 40, { instance: node } );
+					this.addPickingPoint( pos, 12, { instance: node } );
 			}
 
 			for(var j in node._components)
@@ -530,121 +248,18 @@ var EditorView = {
 				colors.set( this._picking_points[i][1], i*4 );
 				sizes[i] = this._picking_points[i][2];
 			}
-			Draw.setPointSize(1);
-			Draw.setColor([1,1,1,1]);
-			gl.disable( gl.DEPTH_TEST );
-			Draw.renderPointsWithSize( points, colors, sizes );
+			LS.Draw.setPointSize(1);
+			LS.Draw.setColor([1,1,1,1]);
+			gl.disable( gl.DEPTH_TEST ); //because nodes are show over meshes
+			LS.Draw.renderPointsWithSize( points, colors, sizes );
 			gl.enable( gl.DEPTH_TEST );
 			this._picking_points.length = 0;
 		}
-	},
-
-	//used to render tiny quads with textures (debug info)
-	renderTextures: function()
-	{
-		// Draw shadowmap plane
-		for(var i = 0; i < this.textures_display.length; i++)
-		{
-			var tex = this.textures_display[i];
-
-			gl.viewport(0 + i * 256, 10, 10 + 256, 10 + 256);
-			//gl.viewport(0,0,gl.canvas.width,gl.canvas.height);
-			tex.toViewport();
-			//Shaders.get("screen").uniforms({color: [1,1,1,1]}).draw(RenderModule.viewport3d.screen_plane);
-		}
-		gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
-	},
-
-	createMeshes: function()
-	{
-		//grid
-		var dist = 10;
-		var num = 10;
-		var vertices = [];
-		for(var i = -num; i <= num; i++)
-		{
-			vertices.push([i*dist,0,dist*num]);
-			vertices.push([i*dist,0,-dist*num]);
-			vertices.push([dist*num,0,i*dist]);
-			vertices.push([-dist*num,0,i*dist]);
-		}
-		this.grid_mesh = GL.Mesh.load({vertices:vertices});
-
-		//box
-		vertices = new Float32Array([-1,1,1 , -1,1,-1, 1,1,-1, 1,1,1, -1,-1,1, -1,-1,-1, 1,-1,-1, 1,-1,1]);
-		var triangles = new Uint16Array([0,1, 0,4, 0,3, 1,2, 1,5, 2,3, 2,6, 3,7, 4,5, 4,7, 6,7, 5,6 ]);
-		this.box_mesh = GL.Mesh.load({vertices: vertices, lines:triangles });
-
-		//circle
-		this.circle_mesh = GL.Mesh.circle({size:1,slices:50});
-		this.circle_empty_mesh = GL.Mesh.circle({size:1,slices:50,empty:1});
-
-		//dummy
-		vertices = [];
-		vertices.push([-dist*0.5,0,0],[+dist*0.5,0,0]);
-		vertices.push([0,-dist*0.5,0],[0,+dist*0.5,0]);
-		vertices.push([0,0,-dist*0.5],[0,0,+dist*0.5]);
-		this.dummy_mesh = GL.Mesh.load({vertices:vertices});
-
-		//box
-		vertices = [];
-		vertices.push([-1.0,1.0,1.0],[1.0,1.0,1.0],[-1.0,1.0,-1.0], [1.0,1.0,-1.0],[-1.0,-1.0,1.0], [1.0,-1.0,1.0],[-1.0,-1.0,-1.0], [1.0,-1.0,-1.0]);
-		vertices.push([1.0,-1.0,1.0],[1.0,1.0,1.0],[1.0,-1.0,-1.0],[1.0,1.0,-1.0],[-1.0,-1.0,1.0],[-1.0,1.0,1.0],[-1.0,-1.0,-1.0],[-1.0,1.0,-1.0]);
-		vertices.push([1.0,1.0,1.0],[1.0,1.0,-1.0],[1.0,-1.0,1.0],[1.0,-1.0,-1.0],[-1.0,1.0,1.0],[-1.0,1.0,-1.0],[-1.0,-1.0,1.0],[-1.0,-1.0,-1.0]);
-		this.cube_mesh = GL.Mesh.load({vertices:vertices});
-
-		for(var i = 1; i >= 0.0; i -= 0.02)
-		{
-			var f = ( 1 - 0.001/(i) )*2-1;
-			vertices.push([-1.0,1.0,f],[1.0,1.0,f],[-1.0,-1.0,f], [1.0,-1.0,f]);
-			vertices.push([1.0,-1.0,f],[1.0,1.0,f],[-1.0,-1.0,f],[-1.0,1.0,f]);
-		}
-
-		this.frustum_mesh = GL.Mesh.load({vertices:vertices});
-
-		//cylinder
-		this.cylinder_mesh = GL.Mesh.cylinder({radius:10,height:2});
-
-		//axis
-		vertices = [];
-		var colors = [];
-		dist = 2;
-		vertices.push([0,0,0],[+dist*0.5,0,0]);
-		colors.push([1,0,0,1],[1,0,0,1]);
-		vertices.push([0,0,0],[0,+dist*0.5,0]);
-		colors.push([0,1,0,1],[0,1,0,1]);
-		vertices.push([0,0,0],[0,0,+dist*0.5]);
-		colors.push([0,0,1,1],[0,0,1,1]);
-		this.axis_mesh = GL.Mesh.load({vertices:vertices, colors: colors});
-
-		//top
-		vertices = [];
-		vertices.push([0,0,0],[0,+dist*0.5,0]);
-		vertices.push([0,+dist*0.5,0],[0.1*dist,+dist*0.4,0]);
-		vertices.push([0,+dist*0.5,0],[-0.1*dist,+dist*0.4,0]);
-		this.top_line_mesh = GL.Mesh.load({vertices:vertices});
-
-		//front
-		vertices = [];
-		vertices.push([0,0,0],[0,0,+dist*0.5]);
-		vertices.push([0,0,+dist*0.5],[0,0.1*dist,+dist*0.4]);
-		vertices.push([0,0,+dist*0.5],[0,-0.1*dist,+dist*0.4]);
-		this.front_line_mesh = GL.Mesh.load({vertices:vertices});
-	},
-
-	showTexture: function(tex)
-	{
-		var pos = this.textures_display.indexOf(tex);
-		if(pos != -1)
-			this.textures_display.splice(pos,1);
-		else
-			this.textures_display.push(tex);
 	}
 };
 
 
-LiteGUI.registerModule( EditorView );
-
+CORE.registerModule( EditorView );
 
 
 // GIZMOS *****************************
@@ -654,7 +269,7 @@ LS.SceneNode.prototype.renderEditor = function( node_selected )
 	if(!this.transform)
 		return;
 
-	Draw.setColor([0.3,0.3,0.3,0.5]);
+	LS.Draw.setColor([0.3,0.3,0.3,0.5]);
 	gl.enable(gl.BLEND);
 
 	//if this node has render instances...
@@ -665,112 +280,126 @@ LS.SceneNode.prototype.renderEditor = function( node_selected )
 			for(var i = 0; i < this._instances.length; ++i)
 			{
 				var instance = this._instances[i];
-				if(instance.flags & RI_IGNORE_FRUSTUM)
+				if(instance.flags & LS.RI_IGNORE_FRUSTUM)
 					continue;
 
 				var oobb = instance.oobb;
-				Draw.setColor([0.8,0.5,0.3,0.5]);
-				Draw.push();
-				Draw.multMatrix( instance.matrix );
-				Draw.translate( BBox.getCenter(oobb) );
+				LS.Draw.setColor([0.8,0.5,0.3,0.5]);
+				LS.Draw.push();
+				LS.Draw.multMatrix( instance.matrix );
+				LS.Draw.translate( BBox.getCenter(oobb) );
 
 				//oobb
 				var halfsize = BBox.getHalfsize(oobb);
-				Draw.scale( halfsize );
-				Draw.renderMesh( EditorView.box_mesh );
-				//Draw.renderMesh( EditorView.circle_mesh, gl.TRIANGLES );
-				Draw.pop();
+				LS.Draw.scale( halfsize );
+				LS.Draw.renderMesh( EditorView.debug_render.box_mesh, gl.LINES );
+				//Draw.renderMesh( EditorView.debug_render.circle_mesh, gl.TRIANGLES );
+				LS.Draw.pop();
 
 				if(EditorView.settings.render_aabb) //render AABB
 				{
 					var aabb = instance.aabb;
-					Draw.push();
+					LS.Draw.push();
 					var center = BBox.getCenter(aabb);
 					var halfsize = BBox.getHalfsize(aabb);
-					Draw.translate(center);
-					Draw.setColor([0.5,0.8,0.3,0.5]);
-					Draw.renderWireBox(halfsize[0]*2,halfsize[1]*2,halfsize[2]*2);
-					Draw.pop();
+					LS.Draw.translate(center);
+					LS.Draw.setColor([0.5,0.8,0.3,0.5]);
+					LS.Draw.renderWireBox(halfsize[0]*2,halfsize[1]*2,halfsize[2]*2);
+					LS.Draw.pop();
 				}
 			}
 		}
 	}
-	else //no render instances? then render some axis
+	else if(0)//no render instances? then render some axis
 	{
-		Draw.push();
+		LS.Draw.push();
 		var global_matrix = this.transform.getGlobalMatrix();
 		if(this.transform)
-			Draw.multMatrix( global_matrix );
+			LS.Draw.multMatrix( global_matrix );
 		var s = 5;
-		Draw.renderLines([[s,0,0],[-s,0,0],[0,s,0],[0,-s,0],[0,0,s],[0,0,-s]]);
-		Draw.pop();
+		LS.Draw.renderLines([[s,0,0],[-s,0,0],[0,s,0],[0,-s,0],[0,0,s],[0,0,-s]]);
+		LS.Draw.pop();
+	}
+
+	if(node_selected && EditorView.settings.render_height)
+	{
+		//ground line
+		var center = this.transform.getGlobalPosition();
+		LS.Draw.setColor([0.5,0.8,0.3,0.25]);
+		LS.Draw.renderLines([center,[center[0],0,center[2]]]);
 	}
 
 	gl.disable(gl.BLEND);
 }
 
 
-Light.icon = "mini-icon-light.png";
-Light.gizmo_size = 50;
+LS.Light.icon = "mini-icon-light.png";
+LS.Light.gizmo_size = 50;
 
-Light.prototype.renderEditor = function(node_selected, component_selected )
+LS.Light.prototype.renderEditor = function(node_selected, component_selected )
 {
 	var pos = this.getPosition();
 	var target = this.getTarget();
 
-	Draw.setColor([1,1,1, component_selected ? 0.8 : 0.5 ]);
+	LS.Draw.setColor([1,1,1, component_selected ? 0.8 : 0.5 ]);
+	gl.depthMask( false );
 
 	if(EditorView.settings.render_icons)
 	{
 		gl.enable(gl.BLEND);
-		Draw.renderImage(pos, EditorModule.icons_path + "gizmo-light.png", Light.gizmo_size, true);
+		LS.Draw.setColor(this.enabled ? [1,1,1] :[0.2,0.2,0.2]);
+		LS.Draw.renderImage(pos, EditorModule.icons_path + "gizmo-light.png", LS.Light.gizmo_size, true);
 		gl.disable(gl.BLEND);
-		if(component_selected && this.type != Light.OMNI)
+		if(component_selected && this.type != LS.Light.OMNI)
 		{
-			Draw.setPointSize( 8 );
+			LS.Draw.setPointSize( 8 );
 			gl.disable(gl.DEPTH_TEST);
-			Draw.renderPoints( target ) ;
+			LS.Draw.renderPoints( target ) ;
 			gl.enable(gl.DEPTH_TEST);
 		}
+		LS.Draw.setColor( [1,1,1] );
 	}
 
 	if(!node_selected || !this.enabled) 
+	{
+		gl.depthMask( true );
 		return;
+	}
 
-	if(this.type == Light.OMNI)
+	if(this.type == LS.Light.OMNI)
 	{
 		if(this.range_attenuation)
 		{
-			Draw.setColor(this.color);
-			Draw.setAlpha(this.intensity);
+			LS.Draw.setColor(this.color);
+			LS.Draw.setAlpha(this.intensity);
 			gl.enable(gl.BLEND);
-			Draw.push();
-			Draw.translate( pos );
-			Draw.renderWireSphere(this.att_end);
-			Draw.pop();
+			LS.Draw.push();
+			LS.Draw.translate( pos );
+			LS.Draw.renderWireSphere(this.att_end);
+			LS.Draw.pop();
 			
 			if(this.intensity > 0.1) //dark side
 			{
 				gl.depthFunc(gl.GREATER);
-				Draw.setAlpha(0.1);
-				Draw.push();
-				Draw.translate( pos );
-				Draw.renderWireSphere(this.att_end);
-				Draw.pop();
+				LS.Draw.setAlpha(0.1);
+				LS.Draw.push();
+				LS.Draw.translate( pos );
+				LS.Draw.renderWireSphere(this.att_end);
+				LS.Draw.pop();
 				gl.depthFunc(gl.LESS);
 			}
 
 			gl.disable(gl.BLEND);
 		}
 	}
-	else if (this.type == Light.SPOT)
+	else if (this.type == LS.Light.SPOT)
 	{
 		var temp = vec3.create();
 		var delta = vec3.create();
 		vec3.subtract(delta, target,pos );
 		vec3.normalize(delta, delta);
-		Draw.setColor(this.color);
-		Draw.setAlpha(this.intensity);
+		LS.Draw.setColor(this.color);
+		LS.Draw.setAlpha(this.intensity);
 		gl.enable(gl.BLEND);
 		var f = Math.tan( this.angle_end * DEG2RAD * 0.5 );
 		var near_dist = this.att_start;
@@ -779,91 +408,102 @@ Light.prototype.renderEditor = function(node_selected, component_selected )
 		vec3.scale(temp, delta, far_dist);
 		vec3.add(temp, pos, temp);
 
-		Draw.push();
-			Draw.lookAt(pos,temp,Math.abs(delta[1]) > 0.99 ? [1,0,0] : [0,1,0]); //work in light space, thats easier to draw
+		LS.Draw.push();
+			LS.Draw.lookAt(pos,temp,Math.abs(delta[1]) > 0.99 ? [1,0,0] : [0,1,0]); //work in light space, thats easier to draw
 			
-			Draw.push();
-			Draw.renderLines([[0,0,0],[0,0,-far_dist],
+			LS.Draw.push();
+			LS.Draw.renderLines([[0,0,0],[0,0,-far_dist],
 				[0,f*near_dist,-near_dist],[0,f*far_dist,-far_dist],
 				[0,-f*near_dist,-near_dist],[0,-f*far_dist,-far_dist],
 				[f*near_dist,0,-near_dist],[f*far_dist,0,-far_dist],
 				[-f*near_dist,0,-near_dist],[-f*far_dist,0,-far_dist]
 				]);
-			Draw.translate(0,0,-near_dist);
+			LS.Draw.translate(0,0,-near_dist);
 			if(this.spot_cone)
 			{
-				Draw.renderCircle( near_dist * f,100 );
-				Draw.translate(0,0,near_dist-far_dist);
-				Draw.renderCircle( far_dist * f,100 );
+				LS.Draw.renderCircle( near_dist * f,100 );
+				LS.Draw.translate(0,0,near_dist-far_dist);
+				LS.Draw.renderCircle( far_dist * f,100 );
 			}
 			else
 			{
-				Draw.renderRectangle( near_dist * f*2,near_dist * f*2);
-				Draw.translate(0,0,near_dist-far_dist);
-				Draw.renderRectangle( far_dist * f*2,far_dist * f*2);
+				LS.Draw.renderRectangle( near_dist * f*2,near_dist * f*2);
+				LS.Draw.translate(0,0,near_dist-far_dist);
+				LS.Draw.renderRectangle( far_dist * f*2,far_dist * f*2);
 			}
-			Draw.pop();
+			LS.Draw.pop();
 
 			if(this.intensity > 0.1) //dark side
 			{
 				gl.depthFunc(gl.GREATER);
-				Draw.setAlpha(0.1);
-				Draw.renderLines([[0,0,-near_dist],[0,0,-far_dist],
+				LS.Draw.setAlpha(0.1);
+				LS.Draw.renderLines([[0,0,-near_dist],[0,0,-far_dist],
 					[0,f*near_dist,-near_dist],[0,f*far_dist,-far_dist],
 					[0,-f*near_dist,-near_dist],[0,-f*far_dist,-far_dist],
 					[f*near_dist,0,-near_dist],[f*far_dist,0,-far_dist],
 					[-f*near_dist,0,-near_dist],[-f*far_dist,0,-far_dist]
 					]);
-				Draw.translate(0,0,-near_dist);
+				LS.Draw.translate(0,0,-near_dist);
 				if(this.spot_cone)
 				{
-					Draw.renderCircle( near_dist * f,100 );
-					Draw.translate(0,0,near_dist-far_dist);
-					Draw.renderCircle( far_dist * f,100 );
+					LS.Draw.renderCircle( near_dist * f,100 );
+					LS.Draw.translate(0,0,near_dist-far_dist);
+					LS.Draw.renderCircle( far_dist * f,100 );
 				}
 				else
 				{
-					Draw.renderRectangle( near_dist * f*2,near_dist * f*2);
-					Draw.translate(0,0,near_dist-far_dist);
-					Draw.renderRectangle( far_dist * f*2,far_dist * f*2);
+					LS.Draw.renderRectangle( near_dist * f*2,near_dist * f*2);
+					LS.Draw.translate(0,0,near_dist-far_dist);
+					LS.Draw.renderRectangle( far_dist * f*2,far_dist * f*2);
 				}
 				gl.depthFunc(gl.LESS);
 			}
-		Draw.pop();
-		Draw.setAlpha(1);
+		LS.Draw.pop();
+		LS.Draw.setAlpha(1);
 		gl.disable(gl.BLEND);
 	}
-	else if (this.type == Light.DIRECTIONAL)
+	else if (this.type == LS.Light.DIRECTIONAL)
 	{
 		var temp = vec3.create();
 		var delta = vec3.create();
 		vec3.subtract(delta, target,pos);
 		vec3.normalize(delta, delta);
-		Draw.setColor(this.color);
-		Draw.setAlpha(this.intensity);
+		LS.Draw.setColor(this.color);
+		LS.Draw.setAlpha(this.intensity);
+		gl.enable( gl.BLEND );
+
+		LS.Draw.push();
+		LS.Draw.lookAt(pos,target,Math.abs(delta[1]) > 0.99 ? [1,0,0] : [0,1,0]); //work in light space, thats easier to draw
+		LS.Draw.renderRectangle( this.frustum_size*0.5, this.frustum_size*0.5);
+		LS.Draw.renderLines([[0,0,0],[0,0,-this.att_end]]);
+		LS.Draw.pop();
+
+		gl.disable( gl.BLEND );
+	}
+
+	if(!this._root.transform && EditorView.settings.render_height)
+	{
+		//ground line
 		gl.enable(gl.BLEND);
-
-		Draw.push();
-		Draw.lookAt(pos,target,Math.abs(delta[1]) > 0.99 ? [1,0,0] : [0,1,0]); //work in light space, thats easier to draw
-		Draw.renderRectangle( this.frustum_size*0.5, this.frustum_size*0.5);
-		Draw.renderLines([[0,0,0],[0,0,-this.att_end]]);
-		Draw.pop();
-
+		LS.Draw.setColor([0.5,0.8,0.3,0.25]);
+		LS.Draw.renderLines([pos,[pos[0],0,pos[2]]]);
 		gl.disable(gl.BLEND);
 	}
+
+	gl.depthMask( true );
 }
 
-Light.prototype.renderPicking = function(ray)
+LS.Light.prototype.renderPicking = function(ray)
 {
 	var pos = this.getPosition();
-	EditorView.addPickingPoint( pos, Light.gizmo_size, { instance: this, info: "position" } );
+	EditorView.addPickingPoint( pos, LS.Light.gizmo_size, { instance: this, info: "position" } );
 	/*
 	var color = Renderer.getNextPickingColor( this._root, [this, "position"] );
 	EditorView._picking_points.push([pos,color]);
 	*/
 
 	//target only pick if necessary
-	if( this._root && this._root.transform || this.type == Light.OMNI)
+	if( this._root && this._root.transform || this.type == LS.Light.OMNI)
 		return; 
 
 	var target = this.getTarget();
@@ -874,12 +514,12 @@ Light.prototype.renderPicking = function(ray)
 	*/
 }
 
-Camera.gizmo_size = 50;
+LS.Camera.gizmo_size = 50;
 
-Camera.prototype.renderPicking = function(ray)
+LS.Camera.prototype.renderPicking = function(ray)
 {
 	var pos = this.getEye();
-	EditorView.addPickingPoint( pos, Camera.gizmo_size, { instance: this, info: "eye" } );
+	EditorView.addPickingPoint( pos, LS.Camera.gizmo_size, { instance: this, info: "eye" } );
 
 	/*
 	var color = Renderer.getNextPickingColor( this._root, [this, "eye"] );
@@ -899,29 +539,30 @@ Camera.prototype.renderPicking = function(ray)
 	*/
 }
 
-Camera.prototype.renderEditor = function(node_selected, component_selected)
+LS.Camera.prototype.renderEditor = function( node_selected, component_selected )
 {
 	//do not render active camera frustum
-	if(LS.Renderer.active_camera == this)
+	if(LS.Renderer._current_camera == this)
 		return;
 
 	//get world space coordinates
 	var pos = this.getEye();
 	var target = this.getCenter();
 
-	Draw.setColor([0.33,0.874,0.56, component_selected ? 0.8 : 0.5 ]);
+	LS.Draw.setColor([0.33,0.874,0.56, component_selected ? 0.8 : 0.5 ]);
+	gl.depthMask( false );
 
 	//render camera icon
 	if(EditorView.settings.render_icons)
 	{
 		gl.enable(gl.BLEND);
-		Draw.renderImage( pos, EditorModule.icons_path + "gizmo-camera.png",50, true);
+		LS.Draw.renderImage( pos, EditorModule.icons_path + "gizmo-camera.png",50, true);
 		gl.disable(gl.BLEND);
-		if(component_selected)
+		if(component_selected && !this._root.transform ) //only render in root cameras
 		{
-			Draw.setPointSize( 10 );
+			LS.Draw.setPointSize( 10 );
 			gl.disable(gl.DEPTH_TEST);
-			Draw.renderRoundPoints( target ) ;
+			LS.Draw.renderRoundPoints( target ) ;
 			gl.enable(gl.DEPTH_TEST);
 		}
 	}
@@ -933,6 +574,7 @@ Camera.prototype.renderEditor = function(node_selected, component_selected)
 		var near = this.near;
 		var far = this.far;
 		var mid_frustum = this.frustum_size * 0.5;
+		var aspect = this._aspect;
 
 		var temp = vec3.create();
 		var delta = vec3.create();
@@ -940,81 +582,73 @@ Camera.prototype.renderEditor = function(node_selected, component_selected)
 
 
 		var focus_dist = 0;
+		focus_dist = this.focalLength;
+		/*
 		if(this._root && this._root.transform)
 			focus_dist = (far - near) * 0.5 + near;
 		else
 			focus_dist = vec3.length(delta);
+		*/
 		vec3.normalize(delta, delta);
 		gl.enable(gl.BLEND);
 
 		var up = this.up; //Math.abs(delta[1]) > 0.99 ? [1,0,0] : [0,1,0];
 
-		Draw.push();
-		Draw.lookAt(pos,target,up); //work in light space, thats easier to draw
+		LS.Draw.push();
+		LS.Draw.lookAt(pos,target,up); //work in light space, thats easier to draw
 
-		if( this.type == Camera.ORTHOGRAPHIC)
+		if( this.type == LS.Camera.ORTHOGRAPHIC)
 		{
-			Draw.renderLines([[0,0,-near],[0,0,-focus_dist],
-				[-mid_frustum,mid_frustum,-near],[-mid_frustum,mid_frustum,-focus_dist],
-				[mid_frustum,mid_frustum,-near],[mid_frustum,mid_frustum,-focus_dist],
-				[-mid_frustum,-mid_frustum,-near],[-mid_frustum,-mid_frustum,-focus_dist],
-				[mid_frustum,-mid_frustum,-near],[mid_frustum,-mid_frustum,-focus_dist],
+			LS.Draw.renderLines([[0,0,-near],[0,0,-focus_dist],
+				[-mid_frustum * aspect,mid_frustum,-near],[-mid_frustum * aspect,mid_frustum,-focus_dist],
+				[mid_frustum * aspect,mid_frustum,-near],[mid_frustum * aspect,mid_frustum,-focus_dist],
+				[-mid_frustum * aspect,-mid_frustum,-near],[-mid_frustum * aspect,-mid_frustum,-focus_dist],
+				[mid_frustum * aspect,-mid_frustum,-near],[mid_frustum * aspect,-mid_frustum,-focus_dist],
 			]);
 		}
 		else
 		{
-			Draw.renderLines([[0,0,0],[0,0,-focus_dist],
-				[-f * near,f * near,-near],[-f * focus_dist,f * focus_dist,-focus_dist],
-				[f * near,f * near,-near],[f * focus_dist,f * focus_dist,-focus_dist],
-				[-f * near,-f * near,-near],[-f * focus_dist,-f * focus_dist,-focus_dist],
-				[f * near,-f * near,-near],[f * focus_dist,-f * focus_dist,-focus_dist],
+			LS.Draw.renderLines([[0,0,0],[0,0,-focus_dist],
+				[-f * near * aspect,f * near,-near],[-f * focus_dist * aspect,f * focus_dist,-focus_dist],
+				[f * near * aspect,f * near,-near],[f * focus_dist * aspect,f * focus_dist,-focus_dist],
+				[-f * near * aspect,-f * near,-near],[-f * focus_dist * aspect,-f * focus_dist,-focus_dist],
+				[f * near * aspect,-f * near,-near],[f * focus_dist * aspect,-f * focus_dist,-focus_dist],
 			]);
 		}
 
-		Draw.translate(0,0,-this.near);
+		LS.Draw.translate(0,0,-this.near);
 
-		if( this.type == Camera.ORTHOGRAPHIC)
-			Draw.renderRectangle( mid_frustum * 2, mid_frustum * 2);
+		if( this.type == LS.Camera.ORTHOGRAPHIC)
+			LS.Draw.renderRectangle( mid_frustum * 2 * aspect, mid_frustum * 2);
 		else
-			Draw.renderRectangle( f * near * 2, f * near * 2);
+			LS.Draw.renderRectangle( f * near * 2 * aspect, f * near * 2);
 
-		Draw.translate(0,0,near-focus_dist);
+		LS.Draw.translate(0,0,near-focus_dist);
 
-		if( this.type == Camera.ORTHOGRAPHIC)
-			Draw.renderRectangle( mid_frustum * 2, mid_frustum * 2);
+		if( this.type == LS.Camera.ORTHOGRAPHIC)
+			LS.Draw.renderRectangle( mid_frustum * 2 * aspect, mid_frustum * 2);
 		else
-			Draw.renderRectangle( f * focus_dist * 2, f * focus_dist * 2);
+			LS.Draw.renderRectangle( f * focus_dist * 2 * aspect, f * focus_dist * 2);
 
-		Draw.pop();
+		LS.Draw.pop();
 
 		gl.disable(gl.BLEND);
 	}
+
+	if( node_selected && !this._root.transform && EditorView.settings.render_height)
+	{
+		//ground line
+		gl.enable(gl.BLEND);
+		LS.Draw.setColor([0.5,0.8,0.3,0.25]);
+		LS.Draw.renderLines([pos,[pos[0],0,pos[2]]]);
+		gl.disable(gl.BLEND);
+	}
+
+	gl.depthMask( true );
 }
 
-
-
-
-/*
-MeshRenderer.prototype.renderEditor = function(node_selected)
-{
-	if(!node_selected) return;
-
-	Draw.setColor([0.3,0.3,0.3,0.5]);
-	gl.enable(gl.BLEND);
-	var mesh = this.getMesh();
-	if(!mesh) return;
-
-	var bounding = mesh.bounding || mesh.info;
-	if(!bounding) return;
-
-	Draw.push();
-	if(this._root)
-		Draw.multMatrix( this._root.transform.getGlobalMatrix() );
-
-	Draw.translate(bounding.aabb_center);
-	Draw.renderWireBox(bounding.aabb_halfsize[0]*2,bounding.aabb_halfsize[1]*2,bounding.aabb_halfsize[2]*2);
-	Draw.pop();
-	gl.disable(gl.BLEND);
-}
-*/
+//PRELOAD STUFF
+EditorView.grid_img = new Image();
+EditorView.grid_img.src = "imgs/grid.png";
+EditorView.grid_img.onload = function(){ this.loaded = true; }
 

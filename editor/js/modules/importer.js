@@ -4,356 +4,609 @@
 */
 
 var ImporterModule  = {
+
 	name: "importer",
-
-	settings_panel: [ {name:"importer", title:"Importer", icon:null } ],
-
-	skip_import_dialog: false,
+	
+	//this are saved between sessions
+	preferences: {
+		optimize_data: false,
+		mesh_action: "origin",
+		texture_action: "replace",
+		use_names_to_reference: true,
+		force_lowercase: false
+	},
 
 	init: function()
 	{
-		//attributes.addButton("Save to BIN", true, { callback: function() { EditorModule.saveToDisk(node,true); }});
-		//LiteGUI.menubar.add("Scene/Import resource", { callback: function() { ImporterModule.showImportResourceDialog();} });
+		if(window.gl && window.gl.canvas )
+			LiteGUI.createDropArea( gl.canvas, ImporterModule.onItemDrop.bind(this) );
+		LiteGUI.menubar.add("Actions/Import File", { callback: function() { ImporterModule.showImportResourceDialog(); }});
 
-		this.addFileDropArea( document.body, ImporterModule.onFileDrop.bind(this) );
+		window.addEventListener("paste", this.onPaste.bind(this) );
 	},
 
-	addFileDropArea: function( dropbox, callback )
+	onPaste: function(e)
 	{
-		dropbox.addEventListener("dragenter", onDragEvent, false);
-
-		function onDragEvent(evt)
+		console.log("pasted items:",e.clipboardData.items.length,"files:",e.clipboardData.files.length, "types:", e.clipboardData.types.length);
+		var items = (e.clipboardData || e.originalEvent.clipboardData).items;
+		var item0 = items.length ? items[0] : null;
+		if( item0 && item0.kind == "file" )
 		{
-			dropbox.addEventListener("dragexit", onDragEvent, false);
-			dropbox.addEventListener("dragover", onDragEvent, false);
-			dropbox.addEventListener("drop", onDrop, false);
-			evt.stopPropagation();
-			evt.preventDefault();
-			/*
-			for(var i in evt.dataTransfer.types)
-				if(evt.dataTransfer.types[i] == "Files")
-				{
-					if(evt.type != "dragover")
-						console.log("Drag event: " + evt.type);
-					evt.stopPropagation();
-					evt.preventDefault();
-
-					dropbox.addEventListener("dragexit", onDragEvent, false);
-					dropbox.addEventListener("dragover", onDragEvent, false);
-					dropbox.addEventListener("drop", onDrop, false);
-				}
-			*/
+			this.onLoadPastedItem( item0 );
+			return false; // Prevent the default handler from running.
 		}
-
-		function onDrop(evt)
-		{
-			evt.stopPropagation();
-			evt.preventDefault();
-
-			dropbox.removeEventListener("dragexit", onDragEvent, false);
-			dropbox.removeEventListener("dragover", onDragEvent, false);
-			dropbox.removeEventListener("drop", onDrop, false);
-
-			var r = undefined;
-			//load file in memory
-			if(callback)
-				r = callback(evt);
-
-			if (r === false)
-				ImporterModule.onFileDrop(evt);
-		}
-
-		//triggered when a dropped file has been loaded and processed (used mostly to refresh stuff)
-		$(this).bind("file_dropped", function(evt, file) {
-			//process resource (add to the library, attach to node, etc)
-			ImporterModule.onResourceDropped(evt, file);
-		});
 	},
 
-	/* Loads in memory the content of a File dropped from the Hard drive */
-	onFileDrop: function (evt)
+	onLoadPastedItem: function(item)
 	{
-		console.log("processing filedrop...");
-
-		var files = evt.dataTransfer.files;
-		var count = files.length;
-		
-		for(var i=0; i < files.length; i++)
+		var file = item.getAsFile();
+		if(!file)
+			return;
+		if(!file.name)
 		{
-			var file = files[i];
-			
-			var reader = new FileReader();
-			reader.onload = (function(theFile) {
-				return function(e) {
-					try
-					{
-						ImporterModule.processFileDropped(e, theFile);
-					}
-					catch (err)
-					{
-						trace("Error processing data: " + err);
-					}
-				};
-			})(file);
-
-			var extension = LS.ResourcesManager.getExtension( file.name );
-			var format_type = LS.ResourcesManager.formats[extension];
-			if(!format_type)
-				format_type = "binary";
-
-			if(format_type == "text" || format_type == "json" || format_type == "xml")
-				reader.readAsText(file);
+			if(item.type == "image/png")
+				file.name = "clipboard.png";
+			else if(item.type == "image/jpeg")
+				file.name = "clipboard.jpg";
 			else
-				reader.readAsArrayBuffer(file);
+				file.name = "unknown.bin";
+			LiteGUI.prompt("Enter a filename", function(v){
+				if(!v)
+					return;
+				file.name = v;
+				ImporterModule.loadFileToMemory( file, ImporterModule.showImportResourceDialog.bind( ImporterModule ) );
+			}, { value: file.name });
+		}
+		else
+			ImporterModule.loadFileToMemory( file, ImporterModule.showImportResourceDialog.bind( ImporterModule ) );
+	},
+
+	// Launched when something is drag&drop inside the canvas (could be files, links, or elements of the interface) 
+	onItemDrop: function (evt, options)
+	{
+		var that = this;
+		options = options || {};
+		console.log("processing item drop...");
+
+		//compute on top of which node it was dropped
+		GL.augmentEvent( evt );
+		var node = null;
+		if(evt.canvasx !== undefined ) //canvas drop
+			node = RenderModule.getNodeAtCanvasPosition( evt.canvasx, evt.canvasy );
+	
+		options.node = node;
+		options.event = evt;
+
+		//files
+		var files = evt.dataTransfer.files;
+		if(files && files.length)
+		{
+			//more than one file
+			if(files.length > 1)
+			{
+
+				//sort resources so images goes first?
+				var files = ImporterModule.sortFilesByPriority( files );
+
+				//TODO: show special dialog?
+				for(var i=0; i < files.length; i++)
+				{
+					this.loadFileToMemory( files[i], function(file,options){
+						var filename = file.name.toLowerCase();
+						NotifyModule.show("FILE: " + file.name, { id: "res-msg-" + file.name.hashCode(), closable: true, time: 3000, left: 60, top: 30, parent: "#visor" } );
+						ImporterModule.processResource( file.name, file, that.getImporterOptions( file.name ), function(filename, resource){
+							//meshes must be inserted
+							if(resource.constructor === GL.Mesh)
+								ImporterModule.insertMeshInScene( resource );
+						});
+					},options);
+
+
+				}
+				return;
+			}
+
+			//one single file
+			var file = files[0];
+			this.loadFileToMemory( file, this.showImportResourceDialog.bind(this), options );
+			return true;
 		}
 
-		$("#content").removeClass("highlight");
+		//drag something on the canvas
+		//check if they are resources from other folder
+		if( evt.dataTransfer.getData("res-fullpath") )
+		{
+			var res_filename = evt.dataTransfer.getData("res-filename");
+			var res_fullpath = evt.dataTransfer.getData("res-fullpath");
+			var res_type = evt.dataTransfer.getData("res-type");
+			if(!res_fullpath)
+				res_fullpath = evt.dataTransfer.getData("text/uri-list");
+
+			//if already has a fullpath (one with a unit...), could be a remote file or to move to other folder
+			if(res_fullpath && res_fullpath.split("/").length > 1)
+			{
+				var res_info = LFS.parsePath(res_fullpath);
+				console.log( res_fullpath );
+				DriveModule.onInsertResourceInScene( { dataset: { restype: res_type, fullpath: res_fullpath } }, options );
+				return true;
+			}
+		}
+
+		//dragging component or node
+		if( evt.dataTransfer.getData("uid") )
+		{
+			GL.augmentEvent(evt);
+			var node = RenderModule.getNodeAtCanvasPosition( evt.canvasx, evt.canvasy );
+			if(node)
+				EditorModule.onDropOnNode( node, evt );
+			return true; //dragging node and not inside a component
+		}
+
+		if( evt.dataTransfer.getData("text/uri-list") )
+		{
+			GL.augmentEvent(evt);
+			var node = RenderModule.getNodeAtCanvasPosition( evt.canvasx, evt.canvasy );
+			var url = evt.dataTransfer.getData("text/uri-list");
+			var filename = DriveModule.getFilename(url);
+			ImporterModule.showImportResourceDialog({name:filename,url:url}, {node: node});
+		}
+
 		return true;
 	},
 
-	//once FileReader has read the file from the HD...
-	processFileDropped: function (e, file) { 
-		trace("File loaded: " + file.name);
-		var data = e.target.result;
+	//just guesses the type and loads it into memory
+	loadFileToMemory: function(file, callback, options)
+	{
+		if(!file)
+			return;
 
-		//throw event: it will be get by onResourceDropped
-		file.data = data;
-		$(this).trigger("file_dropped", file);
+		var reader = new FileReader();
+		reader.onload = function(e) {
+			try
+			{
+				file.data = e.target.result;
+				if(callback)
+					callback(file,options);
+			}
+			catch (err)
+			{
+				console.log("Error processing data: " + err);
+			}
+		};
+		reader.onerror = function(err)
+		{
+			console.error(err);
+		}
+
+		var extension = LS.ResourcesManager.getExtension( file.name ).toLowerCase();
+		var format_info = LS.Formats.supported[ extension ];
+		var format_type = "binary";
+		if(format_info)
+			format_type = format_info.dataType || format_info.format;
+
+		if(format_type == "string" || format_type == "text" || format_type == "json" || format_type == "xml")
+			reader.readAsText(file);
+		else
+			reader.readAsArrayBuffer(file);
 	},
 
-	/*
-	saveToDisk: function(node,binary)
+	importFile: function( file, on_complete, options )
 	{
-		if(node == null || node.mesh == null) return;
+		this.loadFileToMemory( file, function(file,options){
+			var res = ImporterModule.processResource( file.name, file, options, on_complete );
+			if(res && on_complete)
+				on_complete(res);
+		},options);
+	},
 
-		//var data = JSON.stringify( selected_node.mesh.info,"Mesh JS Code");
-		var data = null;
-		var extension = ".js";
-		var dataType = 'string';
-		var mesh = ResourcesManager.meshes[node.mesh];
+	getImporterOptions: function()
+	{
+		var import_options = {};
+		for(var i in this.preferences)
+			import_options[i] = this.preferences[i];
+		return import_options;
+	},
 
-		if(!mesh)return;
-
-		if(binary)
-		{
-			data = mesh.toBinary();
-			data = encode64Array(data);
-			dataType = 'base64';
-			extension = ".bin";
-		}
-		else //json
-		{
-			var o = {};
-			o.vertices = typedArrayToArray( mesh.vertices );
-			if(mesh.normals) o.normals = typedArrayToArray( mesh.normals );
-			if(mesh.coords) o.coords = typedArrayToArray( mesh.coords );
-			if(mesh.colors) o.colors = typedArrayToArray( mesh.colors );
-			if(mesh.triangles) o.triangles = typedArrayToArray( mesh.triangles );
-			o.info = mesh.info;
-			data = JSON.stringify(o);
-		}
-
-		var f = mesh.info.filename;
-		if(f == null)
-			f = mesh.name;
-		var end = f.lastIndexOf(".");
-		var start = f.lastIndexOf("/",end);
-		var filename = f.substr(start+1,end-start-1);
-		filename += extension;
-
-		LiteGUI.showMessage("<p>Click the button to save the file as a JSON object.</p><p id='downloadify'>You must have Flash 10 installed to download this file</p>",{close:1});
-
-		$("#downloadify").downloadify({
-			filename: filename,
-			data: data,
-			dataType: dataType,
-			onComplete: function(){ LiteGUI.showMessage("<p>Saved!</p>"); },
-			onCancel: function(){  },
-			onError: function(){ LiteGUI.showMessage("Error saving, file empty?",{close:1}); },
-			transparent: false,
-			swf: 'media/downloadify.swf',
-			downloadImage: 'media/download.png',
-			width: 100,
-			height: 30,
-			transparent: true,
-			append: false
+	sortFilesByPriority: function( files )
+	{
+		var result = [];
+		Array.prototype.push.apply(result,files); //convert to regular array
+		result = result.sort( function(a,b) { 
+			if(is_image(a))
+				return a;
+			if(is_image(b))
+				return b;
+			return a;
 		});
 
-		function inner_end()
+		function is_image( file )
 		{
-			$("#messagebox").hide();
+			var ext = LS.RM.getExtension(file.name);
+			var format = LS.Formats.supported[ext];
+			if(!format || format.type != "image")
+				return false;
+			return true;
 		}
-	},
-	*/
 
-	/* called when the file from HardDrive is loaded in memory (after being dropped) */
-	onResourceDropped: function(e, file)
-	{
-		/*
-		if(ImporterModule.skip_import_dialog)
-		{
-			var res = ImporterModule.processFileContent(e,file);
-			if(res.filename) filename = res.filename;
-			EditorModule.createNodeWithMesh(filename);
-			return;
-		}
-		*/
-
-		ImporterModule.showImportResourceDialog( file );
+		return result;
 	},
 
-	showImportResourceDialog: function(file, options)
+	//show the dialog to perform actions to the imported file
+	showImportResourceDialog: function( file, options, on_complete )
 	{
 		options = options || {};
 
-		var dialog = new LiteGUI.Dialog("dialog_import_resource", {title:"Import Resource", close: true, minimize: true, width: 360, height: 240, scroll: false, draggable: true});
+		var dialog = new LiteGUI.Dialog("dialog_import_resource", {title: "Import File", close: true, minimize: true, width: 480, height: 340, scroll: false, draggable: true});
 		dialog.show();
 
-		var widgets = new LiteGUI.Inspector("import_widgets",{ name_width: "50%" });
-		widgets.addString("Name", file ? file.name : "");
-		widgets.addString("Filename", file ? file.name : "");
-
-		var target = Material.COLOR_TEXTURE;
+		var target = LS.Material.COLOR_TEXTURE;
 		var insert_into = false;
-		var upload_file = false;
-		var optimize_data = true;
-
-		var node = Scene.selected_node;
-		var mat = node ? node.getMaterial() : null;
-
-		if( file )
-		{
-			var info = Parser.getFileFormatInfo( file.name );
-			if(info.type == Parser.MESH_DATA )
-			{
-				widgets.addTitle("Mesh");
-				widgets.addCheckbox("Optimize data", optimize_data, { callback: function(v) { optimize_data = v; }});
-				//widgets.addCheckbox("Insert into scene", insert_into, { callback: function(v) { insert_into = v; }});
-			}
-			if(info.type == Parser.IMAGE_DATA || info.type == Parser.NONATIVE_IMAGE_DATA)
-			{
-				widgets.addTitle("Texture");
-				widgets.addCheckbox("Add to selected node", insert_into, { callback: function(v) { insert_into = v; }});
-				if(mat)
-				{
-					var channels = mat.getTextureChannels();
-					target = channels[0];
-					widgets.addCombo("Channel", target, { values: channels, callback: function(v) { 
-						target = v;
-					}});
-				}
-				widgets.addCheckbox("Optimize data", optimize_data, { callback: function(v) { optimize_data = v; }});
-			}
-			if(info.type == Parser.SCENE_DATA )
-			{
-				widgets.addTitle("Scene");
-				widgets.addCheckbox("Optimize data", optimize_data, { callback: function(v) { optimize_data = v; }});
-			}
-
-		}
-
-		dialog.addButton("Import", { className: "big", callback: inner_import });
-		var imp_and_upload = dialog.addButton("Import & Upload", { className: "big", callback: inner_import });
-		var imp_and_insert = dialog.addButton("Import and Insert", { className: "big", callback: inner_import });
-		dialog.addButton("Cancel", { className: "big", callback: function() { dialog.close(); } });
-
-		dialog.add(widgets);
 
 		var filename = "";
+		var folder = options.folder;
+		var resource = null;
 
-		function inner_import(button, callback)
+		var import_options = this.getImporterOptions();
+
+		var file_content = file ? file.data : null;
+		var url = "";
+		var drop_node = options.node;
+		var material = drop_node ? drop_node.getMaterial() : null;
+
+		var inspector = new LiteGUI.Inspector(null,{ name_width: "50%" });
+		inspector.on_refresh = inner_refresh;
+		inspector.refresh();
+		dialog.add( inspector );
+
+		//* no va...
+		var drop_area = dialog.content;
+		drop_area.addEventListener("dragenter", function (evt) {
+			evt.stopPropagation();
+			evt.preventDefault();
+			return true;
+		},false);
+
+		drop_area.addEventListener("drop", function(evt){
+			evt.preventDefault();
+			evt.stopPropagation();
+			evt.stopImmediatePropagation();
+			var files = evt.dataTransfer.files;
+			if(files && files.length)
+			{
+				inner_setFile(files[0]);
+				inspector.refresh();
+			}
+			return true;
+		}, false);
+		//*/
+
+		//file data and it has a URL associated (comes from dragging a link to this tab)
+		if(file && file.url)
+			inner_setFile(file.url);
+
+		//Function that loads the data
+		function inner_setFile( v )
+		{
+			file = v;
+			file_content = null;
+			if(!file || file.data)
+				return;
+
+			if(v.constructor == String) //URL
+			{
+				var filename = DriveModule.getFilename(v);
+				file = { name: filename, size: 0, type: "?", data: null };
+				var info = LS.Formats.getFileFormatInfo( file.name );
+				var proxy_url = LS.RM.getFullURL( v );
+				if(info && info.format == "text")
+					LiteGUI.requestText( proxy_url, function(v, response) { inner_setContent(v, response.getResponseHeader("Content-Type") ); });
+				else
+					LiteGUI.requestBinary( proxy_url, function(v, response) { inner_setContent(v, response.getResponseHeader("Content-Type") ); });
+				return;
+			}
+
+			//file without data
+			var reader = new FileReader();
+			reader.onload = function(e) { inner_setContent( e.target.result ); inspector.refresh(); }
+			var info = LS.Formats.getFileFormatInfo( file.name );
+			if(info && info.format == "text")
+				reader.readAsText( file );
+			else
+				reader.readAsArrayBuffer( file );
+			reader.onerror = function(err)
+			{
+				console.error(err);
+			}
+		}
+
+		//function to assign the content of the file
+		function inner_setContent(v, type)
+		{
+			file_content = v;
+			if(file)
+			{
+				file.data = file_content;
+				file.size = file_content.length || file_content.byteLength;
+				if(type)
+					file.type = type;
+			}
+			inspector.refresh();
+		}
+
+		//refresh the inspector information
+		function inner_refresh()
+		{
+			inspector.clear();
+			//inspector.addInfo(null, "Drag a File into the window or click the button");
+			inspector.addTitle("Select a file" );
+			inspector.addFile("Import from Harddrive", file ? file.name : "", function(v){
+				//console.log(v);
+				inner_setFile( file = v ? v.file : null );
+				inspector.refresh();
+			});
+			inspector.addString("Import from URL", url, { callback: function(v){
+				url = v;
+				inner_setFile( v );
+				inspector.refresh();
+			}});
+
+			inspector.addTitle("Destination" );
+			inspector.addFolder("Save to folder", folder || "", { callback: function(v){
+				folder = v;
+			}});
+
+			if(file)
+			{
+				inspector.addTitle("File Information" );
+				inspector.addString("Filename", file.name );
+				inspector.addInfo("Bytes", DriveModule.beautifySize( file.size ) );
+				inspector.addInfo("Type", file.type );
+
+				inspector.addCheckbox("Optimize data", import_options.optimize_data, { callback: function(v) { import_options.optimize_data = v; }});
+
+				var info = LS.Formats.getFileFormatInfo( file.name );
+				if(!info)
+				{
+					inspector.addTitle("Unknown resource");
+				}
+				else if(info.resource == "Mesh" )
+				{
+					inspector.addTitle("Mesh");
+					inspector.addCombo("Action", ImporterModule.preferences.mesh_action, { values: {"Insert in Origin":"origin","Insert in intersection":"plane","Replace Mesh":"replace"}, callback: function(v) { 
+						ImporterModule.preferences.mesh_action = v;
+					}});
+					//inspector.addCheckbox("Insert into scene", insert_into, { callback: function(v) { insert_into = v; }});
+				}
+				else if(info.resource == "Texture" )
+				{
+					inspector.addTitle("Texture");
+					inspector.addCombo("Action", ImporterModule.preferences.texture_action, { values: {"Replace in material":"replace","Insert as Plane":"plane","Insert as Sprite":"sprite"}, callback: function(v) { 
+						ImporterModule.preferences.texture_action = v;
+					}});
+
+					if(drop_node)
+					{
+						//inspector.addCheckbox("Add to node material", insert_into, { callback: function(v) { insert_into = v; }});
+						if(material)
+						{
+							var channels = material.getTextureChannels();
+							target = channels[0];
+							inspector.addCombo("Channel", target, { values: channels, callback: function(v) { 
+								target = v;
+							}});
+						}
+					}
+					inspector.addCheckbox("Optimize data", import_options.optimize_data, { callback: function(v) { import_options.optimize_data = v; }});
+				}
+				else if(info.resource == "SceneTree" || info.resource == "SceneNode")
+				{
+					inspector.addTitle("Scene");
+					inspector.addCheckbox("Optimize data", import_options.optimize_data, { callback: function(v) { import_options.optimize_data = v; }});
+					inspector.addCheckbox("Use node names to reference nodes", import_options.use_names_to_reference, { callback: function(v) { import_options.use_names_to_reference = v; }});
+				}
+			}
+		}
+
+		dialog.addButton("Import to Memory", { className: "big", callback: inner_import });
+		var imp_and_insert = dialog.addButton("Import and Insert in Scene", { className: "big", callback: inner_import });
+		dialog.addButton("Cancel", { className: "big", callback: function() { dialog.close(); } });
+
+		function inner_import( button, callback )
 		{
 			if(button == imp_and_insert)
 				insert_into = true;
-			if(button == imp_and_upload)
-				upload_file = true;
 
-			var name = widgets.getValue("Name");
-			filename = widgets.getValue("Filename");
+			if(!file)
+				return LiteGUI.alert("No file imported");
+
+			filename = inspector.getValue("Filename");
 			filename = filename.replace(/ /g,"_"); //no spaces in names			
 
-			options.optimize_data = optimize_data;
-			options.filename = filename;
-			options.target = target; //if its texture
+			for(var i in options)
+				import_options[i] = options[i];
+
+			import_options.filename = filename;
+			import_options.target = target; //if its texture
 			file.filename = filename;
 
-			ImporterModule.processResource(name, file, options, inner_processed);
+			ImporterModule.processResource( name, file, import_options, inner_processed );
 			dialog.close();
 		}
 
-		function inner_processed(filename, resource, options)
+		function inner_processed( filename, resource, options)
 		{
+			options = options || {};
+
 			if(resource.filename)
 				filename = resource.filename;
-			if(insert_into)
+
+			if(folder)
+				inner_saveToFolder( resource, folder );
+			else
 			{
-				if(resource.constructor == GL.Mesh)
-					EditorModule.createNodeWithMesh(filename);
-				else if(resource.constructor == GL.Texture)
-				{
-					var selected_node = SelectionModule.getSelectedNode();
-					if(selected_node)
-					{
-						var mat = selected_node.getMaterial();
-						if(!mat)
-						{
-							mat = new LS.StandardMaterial();
-							selected_node.material = mat;
-						}
-						mat.setTexture( target, resource.filename );
-						LEvent.trigger( selected_node, "changed" );
-						EditorModule.inspectNode( selected_node );
-					}
-				}
-				else if(resource.constructor == LS.SceneTree)
-				{
-					LS.GlobalScene.configure( resource.serialize() );
-				}
+				if(on_complete)
+					on_complete();
 			}
 
-			if(upload_file)
+			//we do this afterwards because saving it could change the name
+			if(insert_into)
 			{
-				DriveModule.showSelectFolderDialog( function(folder) {
-					if(!folder) return;
-					if(!resource.filename) return;
-					DriveModule.uploadAndShowProgress( resource, folder );
-				});
+				options.mesh_action = ImporterModule.preferences.mesh_action;
+				options.texture_action = ImporterModule.preferences.texture_action;
+				DriveModule.onInsertResourceInScene( resource, options );
 			}
+
 			dialog.close();
+		}
+
+		function inner_saveToFolder( resource, folder )
+		{
+			if(!folder)
+				return;
+			if(!resource.filename)
+				return;
+			var fullpath = folder + "/" + resource.filename;
+			LS.ResourcesManager.renameResource( resource.filename, fullpath );
+			resource.fullpath = fullpath;
+
+			DriveModule.saveResource( resource, on_complete, { skip_alerts: true } );
 		}
 	},
 
-	// Called when the user decides to import the resource after clicking Import in the dialog
-	// This function is called when the resource is loaded (async due to img.onload) 
-	// It has to create the resource from the file and call the callback
+	// Called from showImportResourceDialog when a file is loaded in memory
+	// This function wraps the processResource from LS.ResourcesManager to add some extra behaviours
+	// Mostly conversions, optimizations, and so
 	processResource: function (name, file, options, on_complete)
 	{ 
 		options = options || {};
 
+		if(!file.data)
+			return console.error("File data missing, use FileReader");
+
 		var filename = options.filename || file.name;
-		var resource = LS.ResourcesManager.processResource(filename, file.data, options, inner);
+
+		if(this.force_lowercase)
+			filename = filename.toLowerCase(); //force lower case in filenames to avoid case sensitive issues
+
+		var resource = LS.ResourcesManager.processResource( filename, file.data, options, inner );
 
 		return null;
 
 		function inner(filename, resource)
 		{
+			var extension = LS.RM.getExtension( filename );
+			var format = LS.Formats.supported[ extension ];
+
 			if(resource)
 			{
-				if(options.optimize_data && resource.constructor == Mesh)
+				console.log( "Imported resource: " + LS.getObjectClassName(resource) );
+				if(options.optimize_data)
 				{
-					resource._original_data = resource.toBinary().buffer; //ArrayBuffer
-					filename = filename + ".wbin";
+					if( resource.constructor == GL.Mesh && extension != "wbin" )
+					{
+						resource._original_data = resource.toBinary().buffer; //ArrayBuffer
+						filename = filename + ".wbin";
+						LS.ResourcesManager.renameResource( resource.filename, filename );
+					}
+					if( resource.constructor == GL.Texture && (!format || !format["native"]) )
+					{
+						resource._original_data = null;
+						var blob = resource.toBlob(true);
+						var reader = new FileReader();
+						reader.onload = function() {
+							resource._original_data = this.result;
+						};
+						reader.readAsArrayBuffer( blob );
 
-					LS.ResourcesManager.renameResource( resource.filename, filename );
+						filename = filename + ".png";
+						LS.ResourcesManager.renameResource( resource.filename, filename );
+					}
 				}
-				else
+				
+				if(!resource._original_file && !resource._original_data)
 					resource._original_file = file;
+
+				//scenes require to rename some stuff 
+				if(resource.constructor === LS.SceneTree || resource.constructor === LS.SceneNode )
+				{
+					//remove node root, dragging to canvas should add to scene.root
+					options.node = null;
+
+					var resources = resource.getResources({},true);
+
+					if(options.optimize_data)
+					{
+						for(var i in resources)
+						{
+							var res = LS.ResourcesManager.getResource(i);
+							if(res && res.constructor === LS.Animation)
+							{
+								var anim = res;
+								anim.optimizeTracks();
+							}
+						}
+					}
+
+					if( options.use_names_to_reference )
+					{
+						console.log("Converting uids to names in animations and bones");
+						//rename bone references
+						for(var i in resources)
+						{
+							var res = LS.ResourcesManager.getResource(i);
+							if(res && res.constructor === GL.Mesh && res.bones)
+							{
+								var mesh = res;
+								mesh.convertBoneNames( resource, false );
+							}
+						}
+
+						//rename animation tracks
+						if(resource.animations)
+						{
+							var animation = LS.RM.getResource(resource.animations);
+							if(animation)
+								animation.convertIDstoNames( true, resource );
+						}
+					}
+				}
+
 			}
 
 			if(on_complete)
-				on_complete(filename, resource);
+				on_complete( filename, resource, options );
 		}
 	},
+
+	insertMeshInScene: function(mesh)
+	{
+		var node = new LS.SceneNode();
+		node.name = mesh.filename || "Mesh";
+		if( mesh.info && mesh.info.groups || mesh.info.groups.length )
+		{
+			for(var i in mesh.info.groups)
+			{
+				var group = mesh.info.groups[i];
+
+				if(group.material)
+				{
+					var meshrenderer = new LS.Components.MeshRenderer();
+					meshrenderer.mesh = mesh.fullpath || mesh.filename;
+					meshrenderer.submesh_id = i;
+					meshrenderer.material = group.material;
+					node.addComponent( meshrenderer );
+				}
+			}
+		}
+		else
+		{
+			var meshrenderer = new LS.Components.MeshRenderer();
+			meshrenderer.mesh = mesh.fullpath || mesh.filename;
+			node.addComponent( meshrenderer );
+		}
+
+		LS.GlobalScene.root.addChild( node );
+	}
 };
 
-LiteGUI.registerModule( ImporterModule );
+CORE.registerModule( ImporterModule );

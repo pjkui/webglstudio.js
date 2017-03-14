@@ -14,6 +14,7 @@ var ToolsModule = {
 	tool: 'select',
 
 	current_tool: null,
+	background_tools: [],
 	tools: {},
 	buttons: {},
 
@@ -35,24 +36,25 @@ var ToolsModule = {
 		}
 
 		//initGUI
-		//place to put all the icons of the tools
-		RenderModule.viewport3d.addModule(this);
+		//place to put all the icons of the tools (really? just use the events system)
+		RenderModule.canvas_manager.addWidget(this);
 		this.createToolbar();
-
-		//testing features
-		//LEvent.bind( LS.GlobalScene, "afterRenderScene", this.renderView.bind(this));
-
-		LiteGUI.menubar.add("View/Tools menu", { callback: function() { $("#visor .tool-section").fadeIn(); }});
 	},
 
 	registerTool: function(tool)
 	{
-		this.tools[tool.name] = tool;
+		this.tools[ tool.name ] = tool;
 	},
 
-	registerButton: function(button)
+	registerButton: function( button )
 	{
 		this.buttons[button.name] = button;
+	},
+
+	// a tool that is always active (used for selection tool)
+	addBackgroundTool: function( tool )
+	{
+		this.background_tools.push( tool );
 	},
 
 	keydown: function(e)
@@ -82,23 +84,25 @@ var ToolsModule = {
 			if(this.current_tool.module) 
 			{
 				if(!this.current_tool.keep_module)
-					RenderModule.viewport3d.removeModule(this.current_tool.module);
+					RenderModule.canvas_manager.removeWidget(this.current_tool.module);
 				this.current_tool.module.enabled = false;
 			}
 			else if(!this.current_tool.keep_module)
-				RenderModule.viewport3d.removeModule(this.current_tool);
+				RenderModule.canvas_manager.removeWidget(this.current_tool);
 			this.current_tool.enabled = false;
 			if (this.current_tool.onDisable)
 				this.current_tool.onDisable();
 		}
 
-		$("#canvas-tools .tool-button.enabled").removeClass("enabled");
+		var enabled = document.querySelectorAll("#canvas-tools .tool-button.enabled");
+		for(var i = 0; i < enabled.length; i++)
+			enabled[i].classList.remove("enabled");
 
+		var old_tool = this.current_tool;
 		this.current_tool = null;
 		var tool = this.tools[name];
-		if(!tool) return;
-
-		//$("#canvas-tools .tool-" + name).addClass("selected");
+		if(!tool)
+			return;
 
 		this.current_tool = tool;
 		if( this.current_tool.onClick )
@@ -106,16 +110,42 @@ var ToolsModule = {
 
 		if(tool.module)
 		{ 
-			RenderModule.viewport3d.addModule(tool.module);
+			RenderModule.canvas_manager.addWidget(tool.module);
 			tool.module.enabled = true;
 		}
-		else RenderModule.viewport3d.addModule(tool);
+		else RenderModule.canvas_manager.addWidget(tool);
 		this.current_tool.enabled = true;
 
 		if (this.current_tool.onEnable)
 			this.current_tool.onEnable();
-		$(this).trigger("tool_enabled", this.current_tool );
+
+		if(old_tool && old_tool.inspect && InterfaceModule.inspector_widget.instance == old_tool)
+			EditorModule.inspect( SelectionModule.getSelectedNode() );
+
+		LiteGUI.trigger( this, "tool_enabled", this.current_tool );
 		LS.GlobalScene.refresh();
+	},
+
+	showToolProperties: function( tool_name )
+	{
+		var tool = this.tools[ tool_name ];
+		if(!tool)
+			return;
+
+		this.enableTool( tool_name );
+
+		if(!tool.inspect)
+			return;
+
+		EditorModule.inspect( tool );
+	},
+
+	showButtonProperties: function( button_name )
+	{
+		var button = this.buttons[ button_name ];
+		if(!button || !button.inspect)
+			return;
+		EditorModule.inspect( button );
 	},
 
 	//every frame
@@ -127,24 +157,8 @@ var ToolsModule = {
 		if(!this._active_camera)
 			return;
 		var camera = this._active_camera;
-		LS.Renderer.enableCamera(camera); //sets viewport, update matrices and set Draw
-		/*
-		var viewport = camera.getLocalViewport( LS.Renderer._full_viewport );
-		gl.viewport( viewport[0], viewport[1], viewport[2], viewport[3] );
-		*/
+		LS.Renderer.enableCamera( camera ); //sets viewport, update matrices and set Draw
 		this.renderView(null, camera);
-
-		/*
-		var cameras = RenderModule.cameras;
-		var viewport = vec4.create();
-		for(var i = 0; i < cameras.length; i++)
-		{
-			var camera = cameras[i];
-			camera.getLocalViewport( LS.Renderer._full_viewport, viewport );
-			gl.viewport( viewport[0], viewport[1], viewport[2], viewport[3] );
-			this.renderView(null, camera);
-		}
-		*/
 	},
 
 	renderView: function(e, camera)
@@ -156,24 +170,54 @@ var ToolsModule = {
 			this.current_tool.renderEditor( camera );
 	},
 
+	mouseevent: function(e)
+	{
+		if(this.background_tools.length)
+		{
+			for(var i = 0; i < this.background_tools.length; ++i)
+			{
+				var tool = this.background_tools[i];
+				if(tool[e.type])
+					if( tool[e.type](e) )
+						break;
+			}
+		}
+	},
+
+	mousedown: function(e)
+	{
+		return this.mouseevent(e);
+	},
+
+	mouseup: function(e)
+	{
+		return this.mouseevent(e);
+	},
+
 	mousemove: function(e)
 	{
-		if(e.dragging)
-			return;
+		//when the mouse is not dragging we update active camera
+		if(!e.dragging)
+		{
+			//active camera is the camera which viewport is below the mouse
+			var camera = RenderModule.getCameraUnderMouse(e);
+			if(!camera || camera == this._active_camera)
+				return;
 
-		var camera = RenderModule.getCameraUnderMouse(e);
-		if(!camera || camera == this._active_camera)
-			return;
-
-		this._active_camera = camera;
-		LS.GlobalScene.refresh();
+			this._active_camera = camera;
+			LS.GlobalScene.refresh();
+		}
+		else
+		{
+			return this.mouseevent(e);
+		}
 	},
 
 	createToolbar: function()
 	{
 		//in case they exist
-		$("#canvas-tools").remove();
-		$("#canvas-buttons").remove();
+		LiteGUI.remove("#canvas-tools");
+		LiteGUI.remove("#canvas-buttons");
 
 		var root = LiteGUI.getById("visor");
 		if(!root)
@@ -188,14 +232,16 @@ var ToolsModule = {
 		for(var i in this.tools)
 		{
 			var tool = this.tools[i];
-			if(tool.display == false) continue;
+			if(tool.display == false)
+				continue;
 			this.addToolButton(tool);
 		}
 
 		for(var i in this.buttons)
 		{
 			var button = this.buttons[i];
-			if(button.display == false) continue;
+			if(button.display == false)
+				continue;
 			this.addStateButton(button);
 		}
 	},
@@ -204,25 +250,38 @@ var ToolsModule = {
 	{
 		var root = document.getElementById("canvas-tools");
 
-		var element = this.createButton(tool, root );
+		var element = this.createButton( tool, root );
 		element.className += " tool-" + tool.name + " " + (tool.enabled ? "enabled":"");
 
-		$(element).click(function(e){
-			ToolsModule.enableTool(this.data);
+		if(!tool.className)
+			tool.className = "tool";
+		element.addEventListener("click", function(e){
+			ToolsModule.enableTool( this.data );
 			LS.GlobalScene.refresh();
 			$("#canvas-tools .enabled").removeClass("enabled");
-			$(this).addClass("enabled");
+			this.classList.add("enabled");
 		});
+
+		element.addEventListener("contextmenu", function(e) { 
+			if(e.button != 2) //right button
+				return false;
+			e.preventDefault(); 
+			ToolsModule.showToolProperties( this.data );
+			return false;
+		} );
+
 	},
 
 	addStateButton: function( button )
 	{
 		var root = document.getElementById("canvas-buttons");
 
-		var element = this.createButton(button, root);
+		var element = this.createButton( button, root );
 		element.className += " tool-" + button.name + " " + (button.enabled ? "enabled":"");
+		element.addEventListener("click", inner_onClick );
 
-		$(element).click(function(e){
+		function inner_onClick( e )
+		{
 			if(button.combo)
 			{
 				var section_name = "tool-section-" + button.section;
@@ -233,28 +292,33 @@ var ToolsModule = {
 				return;
 
 			var ret = button.callback();
-			if(typeof(ret) != "undefined")
+			if( ret !== undefined )
 			{
 				if(ret)
-					$(this).addClass("enabled");
+					this.classList.add("enabled");
 				else
-					$(this).removeClass("enabled");
+					this.classList.remove("enabled");
 			}
 			else if(!button.combo)
-				$(this).toggleClass("enabled");
+				this.classList.toggle("enabled");
 			else
-				$(this).addClass("enabled");
+				this.classList.add("enabled");
 			LS.GlobalScene.refresh();
 
 			e.preventDefault();
 			return false;
-		});
+		}
 
-		//if(button.enabled)
-		//	$(element).click();
+		element.addEventListener("contextmenu", function(e) { 
+			if(e.button != 2) //right button
+				return false;
+			e.preventDefault(); 
+			ToolsModule.showButtonProperties( this.data );
+			return false;
+		});
 	},
 
-	createButton: function(button, root)
+	createButton: function( button, root )
 	{
 		var element = document.createElement("div");
 		element.className = "tool-button";
@@ -262,28 +326,40 @@ var ToolsModule = {
 		if (button.icon) {
 			element.style.backgroundImage = "url('" + button.icon + "')";
 		}
-		//element.innerHTML = button.name;
-		if(button.description) element.title = button.description;
+
+		if(button.description)
+			element.title = button.description;
 
 		if(!button.section)
 			button.section = "general";
 
-		var section = root.querySelector(".tool-section-" + button.section);
-
+		var section = this.getSection( button.section, root );
 		if( !section )
-		{
-			var section_element = document.createElement("div");
-			section_element.className = "tool-section tool-section-" + button.section;
-			root.appendChild(section_element);
-			section = section_element;
-		}
+			section = this.createSection( button.section, root );
 
-		$(section).append(element);
+		section.appendChild( element );
 		return element;
+	},
+
+	getSection: function( name, root )
+	{
+		return root.querySelector(".tool-section-" + name);
+	},
+
+	createSection: function( name, root )
+	{
+		var section = root.querySelector(".tool-section-" + name);
+		if( section )
+			return section;
+
+		var section_element = document.createElement("div");
+		section_element.className = "tool-section tool-section-" + name;
+		root.appendChild( section_element );
+		return section_element;
 	}
 };
 
-LiteGUI.registerModule( ToolsModule );
+CORE.registerModule( ToolsModule );
 
 //************* TOOLS *******************
 var ToolUtils = {
@@ -338,7 +414,7 @@ var ToolUtils = {
 
 		camera2d.setOrthographic( viewport[0], viewport[0] + viewport[2], viewport[1], viewport[1] + viewport[3], -1, 1);
 		camera2d.updateMatrices();
-		Draw.setViewProjectionMatrix( camera2d._view_matrix, camera2d._projection_matrix, camera2d._viewprojection_matrix );
+		LS.Draw.setViewProjectionMatrix( camera2d._view_matrix, camera2d._projection_matrix, camera2d._viewprojection_matrix );
 		
 		return camera2d;
 	},
@@ -437,35 +513,40 @@ var ToolUtils = {
 		result = result || vec3.create();
 
 		var ray = camera.getRayInPixel( x, gl.canvas.height - y );
-		//ray.end = vec3.add( vec3.create(), ray.start, vec3.scale(vec3.create(), ray.direction, 10000) );
+		//ray.end = vec3.add( vec3.create(), ray.origin, vec3.scale(vec3.create(), ray.direction, 10000) );
 
 		//test against plane
 		var front = camera.getFront( this.camera_front );
-		if( geo.testRayPlane( ray.start, ray.direction, center, front, result ) )
+		if( geo.testRayPlane( ray.origin, ray.direction, center, front, result ) )
 			return true;
 		return false;
 	},
 
-	computeRotationBetweenPoints: function(center, pointA, pointB, axis )
+	computeRotationBetweenPoints: function( center, pointA, pointB, axis, reverse, scalar )
 	{
+		scalar = scalar || 1;
 		var A = vec3.sub( vec3.create(), pointA, center );
 		var B = vec3.sub( vec3.create(), pointB, center );
 		vec3.normalize(A,A);
 		vec3.normalize(B,B);
 		var AcrossB = vec3.cross(vec3.create(),A,B);
-		if(!axis)
-			axis = AcrossB;
-
-		vec3.normalize(axis, axis);
 
 		var AdotB = vec3.dot(A,B); //clamp
-		var angle = -Math.acos( AdotB );
-		//if( vec3.dot(AcrossB, axis) < 0 )
-		//	angle *= -1;
-		var Q = quat.create();
-		if(!isNaN(angle))
-			quat.setAxisAngle(Q, axis, angle );
-		return Q;
+		//var angle = -Math.acos( AdotB );
+		var angle = -Math.acos( Math.clamp( vec3.dot(A,B), -1,1) );
+		if(angle)
+		{
+			if(!axis)
+				axis = AcrossB;
+			vec3.normalize(axis, axis);
+			if( reverse && vec3.dot(AcrossB, axis) < 0 )
+				angle *= -1;
+			angle *= scalar;
+			if(!isNaN(angle) && angle)
+				return quat.setAxisAngle( quat.create(), axis, angle );
+		}
+
+		return quat.create();
 	},
 
 	computeDistanceFactor: function(v, camera)
@@ -477,23 +558,50 @@ var ToolUtils = {
 	//useful generic methods
 	saveNodeTransformUndo: function(node)
 	{
-		UndoModule.saveNodeTransformUndo(node);
+		if(!node || node.constructor !== LS.SceneNode)
+		{
+			console.error("saveNodeTransformUndo node must be SceneNode");
+			return;
+		}
+
+		CORE.userAction("node_transform",node);
+		//UndoModule.saveNodeTransformUndo(node);
+	},
+
+	saveSelectionTransformUndo: function()
+	{
+		CORE.userAction("nodes_transform", SelectionModule.getSelectedNodes() );
+		//UndoModule.saveNodeTransformUndo(node);
+		//UndoModule.saveNodesTransformUndo( SelectionModule.getSelectedNodes() );
+	},
+
+	afterSelectionTransform: function()
+	{
+		CORE.afterUserAction("nodes_transform", SelectionModule.getSelectedNodes() );
 	},
 
 	//test if a ray collides circle
-	testCircle: function(ray, axis, center, radius, result )
-	{
-		//test with the plane containing the circle
-		if( geo.testRayPlane( ray.start, ray.direction, center, axis, result ) )
+	testCircle: (function(){ 
+		var temp = vec3.create();
+		return function(ray, axis, center, radius, result, tolerance )
 		{
-			var dist = vec3.dist( result, center );
-			var diff = vec3.subtract( result, result, center );
-			vec3.scale(diff, diff, 1 / dist); //normalize?
-			if( Math.abs(radius - dist) < radius * 0.1 && vec3.dot(diff, ray.direction) < 0.0 )
-				return true;
+			tolerance = tolerance || 0.1;
+			//test with the plane containing the circle
+			if( geo.testRayPlane( ray.origin, ray.direction, center, axis, result ) )
+			{
+				var dist = vec3.dist( result, center );
+				var diff = vec3.subtract( temp, result, center );
+				vec3.scale(diff, diff, 1 / dist); //normalize?
+				if( Math.abs(radius - dist) < radius * tolerance && vec3.dot(diff, ray.direction) < 0.0 )
+				{
+					result.set( diff );
+					vec3.scale( result, result, radius );
+					return true;
+				}
+			}
+			return false;
 		}
-		return false;
-	}
+	})()
 };
 
 var notoolButton = {

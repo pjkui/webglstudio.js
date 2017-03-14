@@ -6,26 +6,35 @@ if(typeof(GL) == "undefined")
 
 function enableWebGLCanvas( canvas, options )
 {
+	var gl;
 	options = options || {};
 
+	// Detect if canvas is WebGL enabled and get context if possible
 	if(!canvas.is_webgl)
 	{
-		var gl = canvas.getContext("webgl");
-		if(!gl)
-			throw("This canvas cannot be used as WebGL, maybe WebGL is not supported or this canvas has already a 2D context associated");
-		GL.create({canvas: canvas});
+		options.canvas = canvas;
+		options.alpha = true;
+		options.stencil = true;
+		try {
+			gl = GL.create(options);
+		} catch(e) {
+			console.log("This canvas cannot be used as WebGL, maybe WebGL is not supported or this canvas has already a 2D context associated");
+			gl = canvas.getContext("2d", options);
+			return gl;
+       	}
 	}
+	else
+		gl = canvas.gl;
+
+
+	// Return if canvas is already canvas2DtoWebGL enabled
+	if(canvas.canvas2DtoWebGL_enabled)
+		return gl;
 
 	//settings
 	var curveSubdivisions = 50;
 	var max_points = 10000; //max amount of vertex allowed to have in a single primitive
 	var max_characters = 1000; //max amount of characters allowed to have in a single fillText
-
-
-	//get the context	
-	var gl = canvas.getContext("webgl");
-	if(canvas.canvas2DtoWebGL_enabled)
-		return gl;
 
 	//flag it for future uses
 	canvas.canvas2DtoWebGL_enabled = true;
@@ -49,6 +58,8 @@ function enableWebGLCanvas( canvas, options )
 	var quad_mesh = GL.Mesh.getScreenQuad();
 	var is_rect = false;
 	var extra_projection = mat4.create();
+	var stencil_enabled = false;
+	var anisotropic = options.anisotropic !== undefined ? options.anisotropic : 2;
 
 	var uniforms = {
 		u_texture: 0
@@ -96,22 +107,58 @@ function enableWebGLCanvas( canvas, options )
 			}\n\
 		", extra_macros );
 
+	var	textured_transform_shader = new GL.Shader(GL.Shader.QUAD_VERTEX_SHADER,"\n\
+			precision highp float;\n\
+			uniform sampler2D u_texture;\n\
+			uniform vec4 u_color;\n\
+			uniform vec4 u_texture_transform;\n\
+			varying vec2 v_coord;\n\
+			void main() {\n\
+				vec2 uv = v_coord * u_texture_transform.zw + vec2(u_texture_transform.x,0.0);\n\
+				uv.y = uv.y - u_texture_transform.y + (1.0 - u_texture_transform.w);\n\
+				uv = clamp(uv,vec2(0.0),vec2(1.0));\n\
+				gl_FragColor = u_color * texture2D(u_texture, uv);\n\
+			}\n\
+		", extra_macros );
+
 	var	textured_primitive_shader = new GL.Shader(vertex_shader,"\n\
 			precision highp float;\n\
 			varying float v_visible;\n\
 			uniform vec4 u_color;\n\
 			uniform sampler2D u_texture;\n\
-			uniform vec2 u_itexture_size;\n\
+			uniform vec4 u_texture_transform;\n\
 			uniform vec2 u_viewport;\n\
 			uniform mat3 u_itransform;\n\
 			void main() {\n\
 				vec2 pos = (u_itransform * vec3( gl_FragCoord.s, u_viewport.y - gl_FragCoord.t,1.0)).xy;\n\
-				pos *= vec2( (u_viewport.x * u_itexture_size.x), (u_viewport.y * u_itexture_size.y) );\n\
-				vec2 uv = fract(pos / u_viewport);\n\
+				pos *= vec2( (u_viewport.x * u_texture_transform.z), (u_viewport.y * u_texture_transform.w) );\n\
+				vec2 uv = fract(pos / u_viewport) + u_texture_transform.xy;\n\
 				uv.y = 1.0 - uv.y;\n\
 				gl_FragColor = u_color * texture2D( u_texture, uv);\n\
 			}\n\
 		", extra_macros );
+
+	var	gradient_primitive_shader = new GL.Shader(vertex_shader,"\n\
+			precision highp float;\n\
+			varying float v_visible;\n\
+			uniform vec4 u_color;\n\
+			uniform sampler2D u_texture;\n\
+			uniform vec4 u_gradient;\n\
+			uniform vec2 u_viewport;\n\
+			uniform mat3 u_itransform;\n\
+			void main() {\n\
+				vec2 pos = (u_itransform * vec3( gl_FragCoord.s, u_viewport.y - gl_FragCoord.t,1.0)).xy;\n\
+				//vec2 pos = vec2( gl_FragCoord.s, u_viewport.y - gl_FragCoord.t);\n\
+				vec2 AP = pos - u_gradient.xy;\n\
+				vec2 AB = u_gradient.zw - u_gradient.xy;\n\
+				float dotAPAB = dot(AP,AB);\n\
+				float dotABAB = dot(AB,AB);\n\
+				float x = dotAPAB / dotABAB;\n\
+				vec2 uv = vec2( x, 0.0 );\n\
+				gl_FragColor = u_color * texture2D( u_texture, uv );\n\
+			}\n\
+		", extra_macros );
+
 
 	//some people may reuse it
 	ctx.WebGLCanvas.vertex_shader = vertex_shader;
@@ -121,6 +168,7 @@ function enableWebGLCanvas( canvas, options )
 	var tmp_mat3 = mat3.create();
 	var tmp_vec2 = vec2.create();
 	var tmp_vec4 = vec4.create();
+	var tmp_vec4b = vec4.create();
 	var tmp_vec2b = vec2.create();
 	ctx._stack = [];
 	var global_angle = 0;
@@ -146,6 +194,15 @@ function enableWebGLCanvas( canvas, options )
 		mat3.scale( this._matrix, this._matrix, tmp_vec2 );
 	}
 
+	//own method to reset internal stuff
+	ctx.resetTransform = function()
+	{
+		//reset transform
+		gl._stack.length = 0;
+		this._matrix.set([1,0,0, 0,1,0, 0,0,1]);
+		global_angle = 0;
+	}
+
 	ctx.save = function() {
 		if(this._stack.length < 32)
 			this._stack.push( mat3.clone( this._matrix ) );
@@ -157,6 +214,14 @@ function enableWebGLCanvas( canvas, options )
 		else
 			mat3.identity( this._matrix );
 		global_angle = Math.atan2( this._matrix[3], this._matrix[4] ); //use up vector
+		if(	stencil_enabled )
+		{
+			gl.enable( gl.STENCIL_TEST );
+			gl.clearStencil( 0x0 );
+			gl.clear( gl.STENCIL_BUFFER_BIT );
+			gl.disable( gl.STENCIL_TEST );
+			stencil_enabled = false;
+		}
 	}
 
 	ctx.transform = function(a,b,c,d,e,f) {
@@ -217,14 +282,14 @@ function enableWebGLCanvas( canvas, options )
 				tex = img.gl[ gl.context_id ];
 				if(tex)
 					return tex;
-				return img.gl[ gl.context_id ] = GL.Texture.fromImage(img, { magFilter: gl.LINEAR, minFilter: gl.LINEAR_MIPMAP_LINEAR, wrap: wrap, ignore_pot:true, premultipliedAlpha: true } );
+				return img.gl[ gl.context_id ] = GL.Texture.fromImage(img, { magFilter: gl.LINEAR, minFilter: gl.LINEAR_MIPMAP_LINEAR, wrap: wrap, ignore_pot:true, premultipliedAlpha: true, anisotropic: anisotropic } );
 			}
 			else //probably a canvas
 			{
 				tex = img.gl[ gl.context_id ];
 				if(tex)
 					return tex;
-				return img.gl[ gl.context_id ] = GL.Texture.fromImage(img, { minFilter: gl.LINEAR, magFilter: gl.LINEAR });
+				return img.gl[ gl.context_id ] = GL.Texture.fromImage(img, { minFilter: gl.LINEAR, magFilter: gl.LINEAR, anisotropic: anisotropic });
 			}
 		}
 
@@ -240,23 +305,36 @@ function enableWebGLCanvas( canvas, options )
 		if(!tex)
 			return;
 
+		if(arguments.length == 9) //img, sx,sy,sw,sh, x,y,w,h
+		{
+			tmp_vec4b.set([x/img.width,y/img.height,w/img.width,h/img.height]);
+			x = arguments[5];
+			y = arguments[6];
+			w = arguments[7];
+			h = arguments[8];
+			shader = textured_transform_shader;
+		}
+		else
+			tmp_vec4b.set([0,0,1,1]); //reset texture transform
+
 		tmp_vec2[0] = x; tmp_vec2[1] = y;
 		tmp_vec2b[0] = w === undefined ? tex.width : w;
 		tmp_vec2b[1] = h === undefined ? tex.height : h;
 
 		tex.bind(0);
-		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, this.imageSmoothingEnabled ? gl.LINEAR : gl.NEAREST );
+		if(tex !== img) //only apply the imageSmoothingEnabled if we are dealing with images, not textures
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, this.imageSmoothingEnabled ? gl.LINEAR : gl.NEAREST );
 
 		if(!this.tintImages)
 		{
-			tmp_vec4[0] = tmp_vec4[1] = tmp_vec4[2] = 1.0;
-			tmp_vec4[3] = this._globalAlpha;
+			tmp_vec4[0] = tmp_vec4[1] = tmp_vec4[2] = 1.0;	tmp_vec4[3] = this._globalAlpha;
 		}
 
 		uniforms.u_color = this.tintImages ? this._fillcolor : tmp_vec4;
 		uniforms.u_position = tmp_vec2;
 		uniforms.u_size = tmp_vec2b;
 		uniforms.u_transform = this._matrix;
+		uniforms.u_texture_transform = tmp_vec4b;
 		uniforms.u_viewport = viewport;
 
 		shader = shader || texture_shader;
@@ -268,6 +346,111 @@ function enableWebGLCanvas( canvas, options )
 	{
 		return getTexture( img );
 	}
+
+	//to craete gradients
+	function WebGLCanvasGradient(x,y,x2,y2)
+	{
+		this.id = (ctx._last_gradient_id++) % ctx._max_gradients;
+		this.points = new Float32Array([x,y,x2,y2]);
+		this.stops = [];
+		this._must_update = true;
+	}
+
+	//to avoid creating textures all the time
+	ctx._last_gradient_id = 0;
+	ctx._max_gradients = 16;
+	ctx._gradients_pool = [];
+
+	WebGLCanvasGradient.prototype.addColorStop = function( pos, color )
+	{
+		var final_color = hexColorToRGBA( color );
+		var v = new Uint8Array(4);
+		v[0] = Math.clamp( final_color[0], 0,1 ) * 255;
+		v[1] = Math.clamp( final_color[1], 0,1 ) * 255;
+		v[2] = Math.clamp( final_color[2], 0,1 ) * 255;
+		v[3] = Math.clamp( final_color[3], 0,1 ) * 255;
+		this.stops.push( [ pos, v ]);
+		this.stops.sort( function(a,b) {return (a[0] > b[0]) ? 1 : ((b[0] > a[0]) ? -1 : 0);} );
+		this._must_update = true;
+	}
+
+	WebGLCanvasGradient.prototype.toTexture = function()
+	{
+		//create a texture from the pool
+		if(!this._texture)
+		{
+			if(this.id != -1)
+				this._texture = ctx._gradients_pool[ this.id ];
+			if(!this._texture)
+			{
+				this._texture = new GL.Texture( 128,1, { format: gl.RGBA, magFilter: gl.LINEAR, wrap: gl.CLAMP_TO_EDGE, minFilter: gl.NEAREST });
+				if(this.id != -1)
+					ctx._gradients_pool[ this.id ] = this._texture;
+			}
+		}
+		if(!this._must_update)
+			return this._texture;
+		this._must_update = false;
+		if(this.stops.length < 1)
+			return this._texture; //no stops
+		if(this.stops.length < 2)
+		{
+			this._texture.fill( this.stops[0][1] );
+			return this._texture; //one color
+		}
+
+		//fill buffer
+		var index = 0;
+		var current = this.stops[index];
+		var next = this.stops[index+1];
+
+		var buffer = new Uint8Array(128*4);
+		for(var i = 0; i < 128; i+=1)
+		{
+			var color = buffer.subarray( i*4, i*4+4 );
+			var t = i/128;
+			if( current[0] > t )
+			{
+				if(index == 0)
+					color.set( current[1] );
+				else
+				{
+					index+=1;						
+					current = this.stops[index];
+					next = this.stops[index+1];
+					if(!next)
+						break;
+					i-=1;
+				}
+			}
+			else if( current[0] <= t && t < next[0] )
+			{
+				var f = (t - current[0]) / (next[0] - current[0]);
+				vec4.lerp( color, current[1], next[1], f );
+			}
+			else if( next[0] <= t )
+			{
+				index+=1;						
+				current = this.stops[index];
+				next = this.stops[index+1];
+				if(!next)
+					break;
+				i-=1;
+			}
+		}
+		//fill the remaining
+		if(i<128)
+			for(var j = i; j < 128; j+=1)
+				buffer.set( current[1], j*4 );
+		this._texture.uploadData( buffer );
+		return this._texture;
+	}
+
+	ctx.createLinearGradient = function( x,y, x2, y2 )
+	{
+		return new WebGLCanvasGradient(x,y,x2,y2);
+	}
+
 
 	//Primitives
 
@@ -336,7 +519,7 @@ function enableWebGLCanvas( canvas, options )
 			var ay, by, cy;
 			var tSquared, tCubed;
 
-			/* cálculo de los coeficientes polinomiales */
+			/* cÃ¡lculo de los coeficientes polinomiales */
 			cx = 3.0 * (cp[1][0] - cp[0][0]);
 			bx = 3.0 * (cp[2][0] - cp[1][0]) - cx;
 			ax = cp[3][0] - cp[0][0] - cx - bx;
@@ -412,13 +595,26 @@ function enableWebGLCanvas( canvas, options )
 		uniforms.u_color = this._fillcolor;
 		uniforms.u_transform = this._matrix;
 
-		//pattern
-		if( this.fillStyle.constructor == GL.Texture )
+		var fill_style = this._fillStyle;
+
+		if( fill_style.constructor === WebGLCanvasGradient ) //gradient
 		{
-			var tex = this.fillStyle;
+			var grad = fill_style;
+			var tex = grad.toTexture();
+			uniforms.u_color = [1,1,1, this.globalAlpha]; 
+			uniforms.u_gradient = grad.points; 
+			uniforms.u_texture = 0;
+			uniforms.u_itransform = mat3.invert( tmp_mat3, this._matrix );
+			tex.bind(0);
+			shader = gradient_primitive_shader;
+		}
+		else if( fill_style.constructor === GL.Texture ) //pattern
+		{
+			var tex = fill_style;
 			uniforms.u_color = [1,1,1, this.globalAlpha]; 
 			uniforms.u_texture = 0;
-			uniforms.u_itexture_size = [1/tex.width, 1/tex.height];
+			tmp_vec4.set([0,0,1/tex.width, 1/tex.height]);
+			uniforms.u_texture_transform = tmp_vec4;
 			uniforms.u_itransform = mat3.invert( tmp_mat3, this._matrix );
 			tex.bind(0);
 			shader = textured_primitive_shader;
@@ -581,7 +777,7 @@ function enableWebGLCanvas( canvas, options )
 
 		//gl.setLineWidth( this.lineWidth );
 		uniforms.u_color = this._strokecolor;
-		flat_primitive_shader.uniforms(uniforms).drawRange(lines_mesh, gl.TRIANGLE_STRIP, 0, pos / 3 );
+		flat_primitive_shader.uniforms( uniforms ).drawRange(lines_mesh, gl.TRIANGLE_STRIP, 0, pos / 3 );
 	}
 
 
@@ -646,8 +842,8 @@ function enableWebGLCanvas( canvas, options )
 	{
 		global_index = 0;
 
-		//fill using a texture
-		if( this.fillStyle.constructor == GL.Texture )
+		//fill using a gradient or pattern
+		if( this._fillStyle.constructor == GL.Texture || this._fillStyle.constructor === WebGLCanvasGradient )
 		{
 			this.beginPath();
 			this.rect(x,y,w,h);
@@ -677,6 +873,24 @@ function enableWebGLCanvas( canvas, options )
 		var v = gl.viewport_data;
 		gl.scissor(v[0],v[1],v[2],v[3]);
 	}
+	
+	ctx.clip = function()
+	{
+		gl.colorMask(false, false, false, false);
+		gl.depthMask(false);
+		
+		//fill stencil buffer
+		gl.enable( gl.STENCIL_TEST );
+		gl.stencilFunc( gl.ALWAYS, 1, 0xFF );
+		gl.stencilOp( gl.KEEP, gl.KEEP, gl.REPLACE ); //TODO using INCR we could allow 8 stencils 
+		
+		this.fill();
+
+		stencil_enabled = true;		
+		gl.colorMask(true, true, true, true);
+		gl.depthMask(true);
+		gl.stencilFunc( gl.EQUAL, 1, 0xFF );
+	}
 
 	//control funcs: used to set flags at the beginning and the end of the render
 	ctx.start2D = function()
@@ -689,6 +903,7 @@ function enableWebGLCanvas( canvas, options )
 		viewport[1] = gl.viewport_data[3];
 		gl.disable( gl.CULL_FACE );
 		gl.disable( gl.DEPTH_TEST );
+		gl.disable( gl.STENCIL_TEST );
 		gl.enable( gl.BLEND );
 		gl.blendFunc( gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA );
 		gl.lineWidth = 1;
@@ -701,6 +916,7 @@ function enableWebGLCanvas( canvas, options )
 		global_index = 0;
 		gl.lineWidth = 1;
 		window.gl = prev_gl;
+		gl.disable( gl.STENCIL_TEST );
 	}
 
 	//extra
@@ -815,7 +1031,12 @@ function enableWebGLCanvas( canvas, options )
 
 	ctx.fillText = ctx.strokeText = function(text,startx,starty)
 	{
-		var atlas = this.createFontAtlas( this._font_family, this._font_mode );
+		if(text === null || text === undefined)
+			return;
+		if(text.constructor !== String)
+			text = String(text);
+
+		var atlas = createFontAtlas.call( this, this._font_family, this._font_mode );
 		var info = atlas.info;
 
 		var points = point_text_vertices;
@@ -908,29 +1129,45 @@ function enableWebGLCanvas( canvas, options )
 
 	ctx.measureText = function(text)
 	{
-		var atlas = this.createFontAtlas( this._font_family, this._font_mode );
+		var atlas = createFontAtlas.call( this, this._font_family, this._font_mode );
 		var info = atlas.info;
 		var point_size = this._font_size * 1.1;
 		var spacing = point_size * atlas.info.spacing / atlas.info.char_size - 1 ;
 		return { width: text.length * spacing, height: point_size };
 	}
 
-	ctx.createFontAtlas = function(fontname, fontmode, force)
+	function createFontAtlas( fontname, fontmode, force )
 	{
 		fontname = fontname || "monospace";
 		fontmode = fontmode || "normal";
 
-		var imageSmoothingEnabled = this.imageSmoothingEnabled;
+		var now = getTime();
 
-		var texture = textures[":font_" + fontname + ":" + fontmode];
+		var imageSmoothingEnabled = this.imageSmoothingEnabled;
+		var useInternationalFont = enableWebGLCanvas.useInternationalFont;
+
+		var canvas_size = 1024;
+
+		var texture_name = ":font_" + fontname + ":" + fontmode + ":" + useInternationalFont;
+
+		var texture = textures[texture_name];
 		if(texture && !force)
 			return texture;
 
-		var canvas = createCanvas(512,512);
-		//document.body.appendChild(canvas);
-		var font_size = (canvas.width * 0.09)|0;
-		var char_size = (canvas.width * 0.1)|0;
+		var max_ascii_code = 200;
+		var chars_per_row = 10;
 
+		if(useInternationalFont) //more characters
+		{
+			max_ascii_code = 400;
+			chars_per_row = 20;
+		}
+
+		var char_size = (canvas_size / chars_per_row)|0;
+		var font_size = (char_size * 0.95)|0;
+
+		var canvas = createCanvas(canvas_size,canvas_size);
+		//document.body.appendChild(canvas); //debug
 		var ctx = canvas.getContext("2d");
 		ctx.fillStyle = "white";
 		ctx.imageSmoothingEnabled = this.imageSmoothingEnabled;
@@ -947,42 +1184,77 @@ function enableWebGLCanvas( canvas, options )
 			spacing: char_size * 0.6, //in pixels
 			space: (ctx.measureText(" ").width / font_size)
 		};
+		
+		yoffset += enableWebGLCanvas.fontOffsetY * char_size;
 
-		//compute individual char width
+		//compute individual char width (WARNING: measureText is very slow)
 		var kernings = info.kernings = {};
-		for(var i = 0; i < 100; i++)
+		for(var i = 33; i < max_ascii_code; i++)
 		{
-			var character = String.fromCharCode(i+33);
+			var character = String.fromCharCode(i);
 			var char_width = ctx.measureText(character).width;
-			kernings[character] = { "width": char_width, "nwidth": char_width / font_size };
+			var char_info = { width: char_width, nwidth: char_width / font_size };
+			kernings[character] = char_info;
 		}
+		
+		var clip = true; //clip every character: debug
 
-		for(var i = 0; i < 100; i++)//valid characters from 33 to 133
+		//paint characters in atlas
+		for(var i = 33; i < max_ascii_code; ++i)//valid characters from 33 to max_ascii_code
 		{
-			var character = String.fromCharCode(i+33);
-			info[i+33] = [character, (x + char_size*0.5)/canvas.width, (y + char_size*0.5) / canvas.height];
-			ctx.fillText(character,Math.floor(x+char_size*xoffset),Math.floor(y+char_size+yoffset),char_size);
-			x += char_size;
-			if((x + char_size) > canvas.width)
+			var character = String.fromCharCode(i);
+			var kerning = kernings[ character ];
+			if( kerning && kerning.width ) //has some visual info
 			{
-				x = 0;
-				y += char_size;
+				info[i] = [character, (x + char_size*0.5)/canvas.width, (y + char_size*0.5) / canvas.height];
+				if(clip)
+				{
+					ctx.save();
+					ctx.beginPath();
+					ctx.rect( Math.floor(x)+0.5,Math.floor(y)+0.5, char_size-2, char_size-2 );
+					ctx.clip();
+					ctx.fillText(character,Math.floor(x+char_size*xoffset),Math.floor(y+char_size+yoffset),char_size);
+					ctx.restore();
+				}
+				else
+					ctx.fillText(character,Math.floor(x+char_size*xoffset),Math.floor(y+char_size+yoffset),char_size);
+				x += char_size; //cannot pack chars closer because rendering points, no quads
+				if((x + char_size) > canvas.width)
+				{
+					x = 0;
+					y += char_size;
+				}
 			}
 
-			//compute kernings
-			var char_width = kernings[character].width;
-			for(var j = 0; j < 100; j++)
+			if( y + char_size > canvas.height )
+				break; //too many characters
+		}
+
+		var last_valid_ascii = i; //the last character in the atlas
+
+		//compute kernings of every char with the rest of chars
+		for(var i = 33; i < last_valid_ascii; ++i)
+		{
+			var character = String.fromCharCode(i);
+			var kerning = kernings[ character ];
+			var char_width = kerning.width;
+			for(var j = 33; j < last_valid_ascii; ++j)
 			{
-				var other = String.fromCharCode(j+33);
-				var other_width = kernings[other].width;
-				var total_width = ctx.measureText(character + other).width;
-				kernings[character][other] = (total_width * 1.45 - char_width - other_width) / font_size;
+				var other = String.fromCharCode(j);
+				var other_width = kernings[other].width; 
+				if(!other_width)
+					continue;
+				var total_width = ctx.measureText(character + other).width; //this is painfully slow...
+				kerning[other] = (total_width * 1.45 - char_width - other_width) / font_size;
 			}
 		}
 
-		texture = GL.Texture.fromImage(canvas, {magFilter: imageSmoothingEnabled ? gl.LINEAR : gl.NEAREST, minFilter: imageSmoothingEnabled ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST, premultiply_alpha: false} );
+		//console.log("Font Atlas Generated:", ((getTime() - now)*0.001).toFixed(2),"s");
+
+		texture = GL.Texture.fromImage( canvas, {magFilter: imageSmoothingEnabled ? gl.LINEAR : gl.NEAREST, minFilter: imageSmoothingEnabled ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST, premultiply_alpha: false} );
 		texture.info = info; //font generation info
-		return textures[":font_" + fontname + ":" + fontmode] = texture;
+
+		return textures[texture_name] = texture;
 	}
 
 	//NOT TESTED
@@ -1002,6 +1274,8 @@ function enableWebGLCanvas( canvas, options )
 	Object.defineProperty(gl, "fillStyle", {
 		get: function() { return this._fillStyle; },
 		set: function(v) { 
+			if(!v)
+				return;
 			this._fillStyle = v;
 			hexColorToRGBA( v, this._fillcolor, this._globalAlpha ); 
 		}
@@ -1010,6 +1284,8 @@ function enableWebGLCanvas( canvas, options )
 	Object.defineProperty(gl, "strokeStyle", {
 		get: function() { return this._strokeStyle; },
 		set: function(v) { 
+			if(!v)
+				return;
 			this._strokeStyle = v; 
 			hexColorToRGBA( v, this._strokecolor, this._globalAlpha );
 		}
@@ -1019,6 +1295,8 @@ function enableWebGLCanvas( canvas, options )
 	Object.defineProperty(gl, "fillColor", {
 		get: function() { return this._fillcolor; },
 		set: function(v) { 
+			if(!v)
+				return;
 			this._fillcolor.set(v);
 		}
 	});
@@ -1026,6 +1304,8 @@ function enableWebGLCanvas( canvas, options )
 	Object.defineProperty(gl, "strokeColor", {
 		get: function() { return this._strokecolor; },
 		set: function(v) { 
+			if(!v)
+				return;
 			this._strokecolor.set(v);
 		}
 	});
@@ -1033,6 +1313,8 @@ function enableWebGLCanvas( canvas, options )
 	Object.defineProperty(gl, "shadowColor", {
 		get: function() { return this._shadowcolor; },
 		set: function(v) { 
+			if(!v)
+				return;
 			hexColorToRGBA( v, this._shadowcolor, this._globalAlpha );
 		}
 	});
@@ -1054,6 +1336,8 @@ function enableWebGLCanvas( canvas, options )
 			{
 				this._font_mode = t[0];
 				this._font_size = parseFloat(t[1]);
+				if( Number.isNaN( this._font_size ) )
+					this._font_size = 14;
 				if(this._font_size < 10) 
 					this._font_size = 10;
 				this._font_family = t[2];
@@ -1062,6 +1346,8 @@ function enableWebGLCanvas( canvas, options )
 			{
 				this._font_mode = "normal";
 				this._font_size = parseFloat(t[0]);
+				if( Number.isNaN( this._font_size ) )
+					this._font_size = 14;
 				if(this._font_size < 10) 
 					this._font_size = 10;
 				this._font_family = t[1];
@@ -1097,10 +1383,13 @@ function enableWebGLCanvas( canvas, options )
 
 
 	//empty functions: this is used to create null functions in those Canvas2D funcs not implemented here
-	var names = ["clip","arcTo","isPointInPath","createImageData"]; //all functions have been implemented
+	var names = ["arcTo","isPointInPath","createImageData"]; //all functions have been implemented
 	var null_func = function() {};
 	for(var i in names)
 		ctx[ names[i] ] = null_func;
 
 	return ctx;
 };
+
+enableWebGLCanvas.useInternationalFont = false; //render as much characters as possible in the texture atlas
+enableWebGLCanvas.fontOffsetY = 0; //hack, some fonts need extra offsets, dont know why

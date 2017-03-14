@@ -14,27 +14,16 @@ var selectTool = {
 
 	onRegister: function()
 	{
-		RenderModule.viewport3d.addModule(this);
+		//RenderModule.canvas_manager.addWidget(this);
+		ToolsModule.addBackgroundTool(this);
 	},
 
 	mousedown: function(e) {
 		this.click_pos = [e.canvasx,e.canvasy];
-
-
+		this._got_mousedown = true;
 	},
 
 	mousemove: function(e) {
-
-		/*		
-		//test raycast
-		var camera = ToolUtils.getCamera();
-		var ray = camera.getRayInPixel( e.mousex, gl.canvas.height - e.mousey );
-		ray.end = vec3.add( vec3.create(), ray.start, vec3.scale(vec3.create(), ray.direction, 10000) );
-		var collisions = Physics.raycast(Scene, ray.start, ray.end);
-
-		if(collisions.length)
-			EditorView.debug_points.push( collisions[0][1] );
-		*/
 	},
 
 	mouseup: function(e) {
@@ -43,17 +32,30 @@ var selectTool = {
 		e.preventDefault();
 		e.stopPropagation();
 
+		if(!this._got_mousedown)
+			return; //somebody else captured the mousedown
+		
+		this._got_mousedown = false;
+
+		if(e.button != 0)
+			return;
+
 		var now = new Date().getTime();
 		var dist = Math.sqrt( (e.canvasx - this.click_pos[0])<<2 + (e.canvasy - this.click_pos[1])<<2 );
+
 		if (e.click_time < this.click_time && dist < this.click_dist) //fast click
 		{
-			var instance_info = LS.Picking.getInstanceAtCanvasPosition( e.canvasx, e.canvasy, ToolUtils.getCamera() );
+			var instance_info = LS.Picking.getInstanceAtCanvasPosition( e.canvasx, e.canvasy, ToolUtils.getCamera(e) );
 			if(!instance_info)
 				return false;
 
-			if(e.button == 2)
-				EditorModule.showContextualNodeMenu( instance_info.constructor === LS.SceneNode ? instance_info : instance_info.instance, e );
-			else if(e.shiftKey)
+			var r = false;
+			if( instance_info.callback )
+				r = instance_info.callback( instance_info, e );
+			if(r)
+				return false;
+
+			if(e.shiftKey)
 			{
 				if( SelectionModule.isSelected( instance_info ) )
 					SelectionModule.removeFromSelection( instance_info );
@@ -62,8 +64,6 @@ var selectTool = {
 			}
 			else
 				SelectionModule.setSelection( instance_info );
-
-			//console.log("found: ", instance_info );
 		}
 
 		return false;

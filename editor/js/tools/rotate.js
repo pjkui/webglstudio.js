@@ -13,8 +13,10 @@ var rotateNodeTool = {
 	_z_axis_end: vec3.create(),
 	_center: vec3.create(),
 	_closest: vec3.create(),
+	_closest_ring: vec3.create(),
 
 	_radius: 1,
+	_dist_factor: 1,
 	_on_top_of: null,
 
 	keyShortcut: 69, //E
@@ -34,10 +36,10 @@ var rotateNodeTool = {
 		var center = vec3.create();
 		mat4.multiplyVec3(center,gizmo_model,center);
 		var f = ToolUtils.computeDistanceFactor(center);
-
+		this._dist_factor = f;
 		vec3.copy(rotateNodeTool._center, center);
 
-		var scale = f *0.15;
+		var scale = f * 0.15;
 
 		var colorx = rotateNodeTool._on_top_of == "x" ? [1,0.9,0.9,1] : [1,0,0,0.8];
 		var colory = rotateNodeTool._on_top_of == "y" ? [0.9,1,0.9,1] : [0,1,0,0.8];
@@ -53,8 +55,8 @@ var rotateNodeTool = {
 		gl.disable(gl.DEPTH_TEST);
 		gl.enable(gl.BLEND);
 		gl.enable(gl.CULL_FACE);
-		Draw.push();
-			Draw.setMatrix(gizmo_model);
+		LS.Draw.push();
+			LS.Draw.setMatrix(gizmo_model);
 
 			var radius = scale*0.8;
 			rotateNodeTool._radius = radius;
@@ -65,35 +67,48 @@ var rotateNodeTool = {
 			mat4.multiplyVec3(rotateNodeTool._z_axis_end, gizmo_model, [0,0,radius] );
 
 			//three axis lines
-			Draw.setColor([1,1,1]);
-			Draw.renderLines( [[0,0,0],[radius,0,0],[0,0,0],[0,radius,0],[0,0,0],[0,0,radius]],
+			LS.Draw.setColor([1,1,1]);
+			LS.Draw.renderLines( [[0,0,0],[radius,0,0],[0,0,0],[0,radius,0],[0,0,0],[0,0,radius]],
 				[colorz,colorz,colorx,colorx,colory,colory]);
 
-			Draw.setColor(colorx);
-			//Draw.renderCylinder(radius, 0.05*scale, 40);
-			Draw.renderCircle( radius, 40, true);
-			mat4.rotateVec3( rotateNodeTool._x_axis_normal, Draw.model_matrix, [0,1,0] );
+			LS.Draw.setColor(colorx);
+			//LS.Draw.renderCylinder(radius, 0.05*scale, 40);
+			LS.Draw.renderCircle( radius, 40, true);
+			mat4.rotateVec3( rotateNodeTool._x_axis_normal, LS.Draw.model_matrix, [0,1,0] );
 
-			Draw.setColor(colory);
-			Draw.rotate(90,[1,0,0]);
-			Draw.renderCircle( radius, 40, true);
-			mat4.rotateVec3( rotateNodeTool._y_axis_normal, Draw.model_matrix, [0,1,0] );
-			//Draw.renderCylinder(radius, 0.05*scale, 40);
+			LS.Draw.setColor(colory);
+			LS.Draw.rotate(90,[1,0,0]);
+			LS.Draw.renderCircle( radius, 40, true);
+			mat4.rotateVec3( rotateNodeTool._y_axis_normal, LS.Draw.model_matrix, [0,1,0] );
+			//LS.Draw.renderCylinder(radius, 0.05*scale, 40);
 
-			Draw.setColor(colorz);
-			Draw.rotate(90,[0,0,1]);
-			Draw.renderCircle( radius, 40, true);
-			mat4.rotateVec3( rotateNodeTool._z_axis_normal, Draw.model_matrix, [0,1,0] );
-			//Draw.renderCylinder(radius, 0.05*scale, 40);
+			LS.Draw.setColor(colorz);
+			LS.Draw.rotate(90,[0,0,1]);
+			LS.Draw.renderCircle( radius, 40, true);
+			mat4.rotateVec3( rotateNodeTool._z_axis_normal, LS.Draw.model_matrix, [0,1,0] );
+			//LS.Draw.renderCylinder(radius, 0.05*scale, 40);
+
+			//draw interior sphere
+			LS.Draw.setColor([0,0,0,0.2]);
+			LS.Draw.push();
+			LS.Draw.scale(radius * 0.99);
+			LS.Draw.renderMesh( EditorView.debug_render.sphere_mesh, gl.TRIANGLES );
+			LS.Draw.pop();
 
 			//*
-			Draw.setColor(colorf);
+			LS.Draw.setColor(colorf);
 			mat4.fromTranslationFrontTop(gizmo_model, center, ToolUtils.camera_front, ToolUtils.camera_top );
-			Draw.setMatrix(gizmo_model);
-			Draw.renderCircle(radius * 1.2, 40 );
+			LS.Draw.setMatrix(gizmo_model);
+			LS.Draw.renderCircle(radius * 1.2, 40 );
 			//*/
 
-		Draw.pop();
+		LS.Draw.pop();
+
+		/* DEBUG
+		LS.Draw.setPointSize( 20 );
+		LS.Draw.setColor([1,0.5,1,0.8]);
+		LS.Draw.renderRoundPoints( this._closest_ring );
+		*/
 
 		gl.enable(gl.DEPTH_TEST);
 	},
@@ -113,14 +128,27 @@ var rotateNodeTool = {
 		if(!this.enabled) 
 			return;
 
+		var selection_info = SelectionModule.getSelection();
+		if( selection_info && selection_info.node && selection_info.node === LS.GlobalScene.root )
+			CORE.afterUserAction("component_changed", selection_info.instance );
+		else //save transform
+			ToolUtils.afterSelectionTransform();
+
 		var node = SelectionModule.getSelectedNode();
-		EditorModule.inspectNode(node);
+		EditorModule.inspect(node);
 	},
 
 	mousemove: function(e) 
 	{
 		if(!this.enabled) 
 			return;
+
+		if( e.metaKey || e.altKey )
+		{
+			this._on_top_of = null;
+			return;
+		}
+
 		var node = SelectionModule.getSelectedNode();
 		if(!node || !node.transform) 
 			return;
@@ -136,18 +164,23 @@ var rotateNodeTool = {
 		var rotateSpeed = 1;
 		var result = vec3.create();
 
+		//this is a HACK for a bug I cannot understand, if the object hast parent it rotates backwards
+		var scalar = 1;
+		if (node.transform._parent)
+			scalar = -1;
+
 		LS.GlobalScene.refresh();
 
 		//is mouse clicked
 		if (e.dragging && e.which == GL.LEFT_MOUSE_BUTTON)
 		{
-			if(!rotateNodeTool._on_top_of)
+			if(!this._on_top_of)
 				return;
 
 			var Q = quat.create();
-			var xaxis = rotateNodeTool._x_axis_normal;
-			var yaxis = rotateNodeTool._y_axis_normal;
-			var zaxis = rotateNodeTool._z_axis_normal;
+			var xaxis = this._x_axis_normal;
+			var yaxis = this._y_axis_normal;
+			var zaxis = this._z_axis_normal;
 
 			//orient vectors locally
 			/*
@@ -159,26 +192,40 @@ var rotateNodeTool = {
 
 			
 
-			if(rotateNodeTool._on_top_of == "center")
+			if(this._on_top_of == "center")
 			{
-				geo.testRaySphere( ray.start, ray.direction, rotateNodeTool._center, rotateNodeTool._radius*1.1, result );
+				if(!geo.testRaySphere( ray.origin, ray.direction, this._center, this._radius*1.1, result ))
+					return true;
+
 				quat.copy(Q, ToolUtils.computeRotationBetweenPoints(center, this._closest, result) );
 				vec3.copy(this._closest,result);
 				//node.transform.rotate(e.deltax * rotateSpeed, rotateNodeTool._x_axis_normal );
 				//node.transform.rotate(e.deltay * rotateSpeed, rotateNodeTool._z_axis_normal );
 			}
-			else if( rotateNodeTool._on_top_of == "x" )
-				quat.setAxisAngle(Q, xaxis, (e.deltax+e.deltay) * rotateSpeed * 0.01);
-			else if( rotateNodeTool._on_top_of == "y" )
+			else if( this._on_top_of == "x" )
 			{
-				quat.setAxisAngle(Q, yaxis, (e.deltax+e.deltay) * rotateSpeed * 0.01);
+				//compute angle between closest_ring and current point
+				geo.testRayPlane( ray.origin, ray.direction, this._center, xaxis, result );
+				quat.copy(Q, ToolUtils.computeRotationBetweenPoints( center, this._closest_ring, result, xaxis, true, scalar) );
+				vec3.copy(this._closest_ring,result);
 			}
-			else if( rotateNodeTool._on_top_of == "z" )
-				quat.setAxisAngle(Q, zaxis, (e.deltax+e.deltay) * rotateSpeed * 0.01);
-			else if( rotateNodeTool._on_top_of == "f" )
+			else if( this._on_top_of == "y" )
 			{
-				//FIX THIS
-				geo.testRayPlane( ray.start, ray.direction, center, ToolUtils.camera_front, result );
+				//compute angle between closest_ring and current point
+				geo.testRayPlane( ray.origin, ray.direction, this._center, yaxis, result );
+				quat.copy(Q, ToolUtils.computeRotationBetweenPoints( center, this._closest_ring, result, yaxis, true, scalar) );
+				vec3.copy(this._closest_ring,result);
+			}
+			else if( this._on_top_of == "z" )
+			{
+				//compute angle between closest_ring and current point
+				geo.testRayPlane( ray.origin, ray.direction, this._center, zaxis, result );
+				quat.copy(Q, ToolUtils.computeRotationBetweenPoints( center, this._closest_ring, result, zaxis, true, scalar) );
+				vec3.copy(this._closest_ring,result);
+			}
+			else if( this._on_top_of == "f" )
+			{
+				geo.testRayPlane( ray.origin, ray.direction, center, ToolUtils.camera_front, result );
 				//closest should be projected to the plane
 				var point = geo.projectPointOnPlane(this._closest, center, ToolUtils.camera_front );
 				quat.copy( Q, ToolUtils.computeRotationBetweenPoints( center, point, result ) );
@@ -195,34 +242,46 @@ var rotateNodeTool = {
 			node.transform.applyTransformMatrix(M, true);
 			*/
 
-			ToolUtils.applyTransformMatrixToSelection(R, center);
+			ToolUtils.applyTransformMatrixToSelection( R, center );
 
 			return true;
 		}
 		else //mouse moving without clicking: test collision
 		{
-			if ( geo.testRaySphere( ray.start, ray.direction, rotateNodeTool._center, rotateNodeTool._radius*1.2, result ) ) 
+			if ( geo.testRaySphere( ray.origin, ray.direction, this._center, this._radius*1.2, result ) ) 
 			{
-				vec3.copy( rotateNodeTool._closest, result );
-				if ( geo.testRaySphere( ray.start, ray.direction, rotateNodeTool._center, rotateNodeTool._radius*1.1, result ) ) 
+				vec3.copy( this._closest, result );
+				if ( geo.testRaySphere( ray.origin, ray.direction, this._center, this._radius*1.1, result ) ) 
 				{
-					vec3.copy( rotateNodeTool._closest, result );
-					if( ToolUtils.testCircle(ray, rotateNodeTool._x_axis_normal, rotateNodeTool._center, rotateNodeTool._radius, result) )
-						rotateNodeTool._on_top_of = "x";
-					else if( ToolUtils.testCircle(ray, rotateNodeTool._y_axis_normal, rotateNodeTool._center, rotateNodeTool._radius,  result) )
-						rotateNodeTool._on_top_of = "y";
-					else if( ToolUtils.testCircle(ray, rotateNodeTool._z_axis_normal, rotateNodeTool._center, rotateNodeTool._radius,  result) )
-						rotateNodeTool._on_top_of = "z";
+					vec3.copy( this._closest, result );
+					if( ToolUtils.testCircle(ray, this._x_axis_normal, this._center, this._radius, result) )
+					{
+						//this._closest_ring.set( result );
+						vec3.add( this._closest_ring, result, this._center );
+						this._on_top_of = "x";
+					}
+					else if( ToolUtils.testCircle(ray, this._y_axis_normal, this._center, this._radius,  result) )
+					{
+						//this._closest_ring.set( result );
+						vec3.add( this._closest_ring, result, this._center );
+						this._on_top_of = "y";
+					}
+					else if( ToolUtils.testCircle(ray, this._z_axis_normal, this._center, this._radius,  result) )
+					{
+						//this._closest_ring.set( result );
+						vec3.add( this._closest_ring, result, this._center );
+						this._on_top_of = "z";
+					}
 					else
-						rotateNodeTool._on_top_of = "center";
+						this._on_top_of = "center";
 
-					vec3.copy( rotateNodeTool._debug_pos, result );
+					vec3.copy( this._debug_pos, result );
 				}
 				else
-					rotateNodeTool._on_top_of = "f";
+					this._on_top_of = "f";
 			}
 			else
-				rotateNodeTool._on_top_of = null;
+				this._on_top_of = null;
 		}
 	}
 };

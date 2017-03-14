@@ -45,33 +45,32 @@ var scaleNodeTool = {
 		}
 
 		gl.disable(gl.DEPTH_TEST);
-		Draw.setColor([0.5,0.5,0.5]);
-		Draw.push();
-			Draw.setMatrix(gizmo_model);
+		LS.Draw.setColor([0.5,0.5,0.5]);
+		LS.Draw.push();
+			LS.Draw.setMatrix(gizmo_model);
 
 			mat4.multiplyVec3(scaleNodeTool._x_axis_end, gizmo_model, [scale,0,0] );
 			mat4.multiplyVec3(scaleNodeTool._y_axis_end, gizmo_model, [0,scale,0] );
 			mat4.multiplyVec3(scaleNodeTool._z_axis_end, gizmo_model, [0,0,scale] );
 
-			Draw.renderLines( [[0,0,0],[scale,0,0],[0,0,0],[0,scale,0],[0,0,0],[0,0,scale]]);
+			LS.Draw.renderLines( [[0,0,0],[scale,0,0],[0,0,0],[0,scale,0],[0,0,0],[0,0,scale]]);
 
-			Draw.setColor(colorx);
-			Draw.translate([scale,0,0]);
-			Draw.renderSolidBox(scale*0.1,scale*0.1,scale*0.1);
-			Draw.setColor(colory);
-			Draw.translate([-scale,scale,0]);
-			Draw.renderSolidBox(scale*0.1,scale*0.1,scale*0.1);
-			Draw.setColor(colorz);
-			Draw.translate([0,-scale,scale]);
-			Draw.renderSolidBox(scale*0.1,scale*0.1,scale*0.1);
-		Draw.pop();
+			LS.Draw.setColor(colorx);
+			LS.Draw.translate([scale,0,0]);
+			LS.Draw.renderSolidBox(scale*0.1,scale*0.1,scale*0.1);
+			LS.Draw.setColor(colory);
+			LS.Draw.translate([-scale,scale,0]);
+			LS.Draw.renderSolidBox(scale*0.1,scale*0.1,scale*0.1);
+			LS.Draw.setColor(colorz);
+			LS.Draw.translate([0,-scale,scale]);
+			LS.Draw.renderSolidBox(scale*0.1,scale*0.1,scale*0.1);
+		LS.Draw.pop();
 
 		gl.enable(gl.DEPTH_TEST);
 	},
 
 	mousedown: function(e) {
 		if(!this.enabled || e.which != GL.LEFT_MOUSE_BUTTON) return;
-
 
 		var node = SelectionModule.getSelectedNode();
 		if(!node || !node.transform) 
@@ -89,8 +88,16 @@ var scaleNodeTool = {
 	},
 
 	mouseup: function(e) {
-		if(!this.enabled) return;
-		EditorModule.inspectNode(Scene.selected_node);
+		if(!this.enabled)
+			return;
+
+		var selection_info = SelectionModule.getSelection();
+		if( selection_info && selection_info.node && selection_info.node === LS.GlobalScene.root )
+			CORE.afterUserAction("component_changed", selection_info.instance );
+		else //save transform
+			ToolUtils.afterSelectionTransform();
+
+		EditorModule.inspect( LS.GlobalScene.selected_node );
 	},
 
 	mousemove: function(e) 
@@ -142,23 +149,23 @@ var scaleNodeTool = {
 		{
 			var ray = camera.getRayInPixel( e.mousex, gl.canvas.height - e.mousey );
 			var result = vec3.create();
-			ray.end = vec3.add( vec3.create(), ray.start, vec3.scale(vec3.create(), ray.direction, 10000 ) );
+			ray.end = vec3.add( vec3.create(), ray.origin, vec3.scale(vec3.create(), ray.direction, 10000 ) );
 
 			var radius = scaleNodeTool._radius;
 
 			var result = vec3.create();
 
-			if ( geo.testRaySphere( ray.start, ray.direction, scaleNodeTool._center, radius*1.1, result ) ) 
+			if ( geo.testRaySphere( ray.origin, ray.direction, scaleNodeTool._center, radius*1.1, result ) ) 
 			{
 				vec3.copy( scaleNodeTool._closest, result );
 
-				if ( geo.testRaySphere( ray.start, ray.direction, scaleNodeTool._center, radius*0.5, result ) ) 
+				if ( geo.testRaySphere( ray.origin, ray.direction, scaleNodeTool._center, radius*0.5, result ) ) 
 					scaleNodeTool._on_top_of = "center";
-				else if ( geo.testRaySphere( ray.start, ray.direction, scaleNodeTool._x_axis_end, scaleNodeTool._radius * 0.1, result ) ) 
+				else if ( geo.testRaySphere( ray.origin, ray.direction, scaleNodeTool._x_axis_end, scaleNodeTool._radius * 0.1, result ) ) 
 					scaleNodeTool._on_top_of = "x";
-				else if ( geo.testRaySphere( ray.start, ray.direction, scaleNodeTool._y_axis_end, scaleNodeTool._radius * 0.1, result ) ) 
+				else if ( geo.testRaySphere( ray.origin, ray.direction, scaleNodeTool._y_axis_end, scaleNodeTool._radius * 0.1, result ) ) 
 					scaleNodeTool._on_top_of = "y";
-				else if ( geo.testRaySphere( ray.start, ray.direction, scaleNodeTool._z_axis_end, scaleNodeTool._radius * 0.1, result ) ) 
+				else if ( geo.testRaySphere( ray.origin, ray.direction, scaleNodeTool._z_axis_end, scaleNodeTool._radius * 0.1, result ) ) 
 					scaleNodeTool._on_top_of = "z";
 				else
 					scaleNodeTool._on_top_of = null;
